@@ -1,3 +1,36 @@
+/*
+ * Copyright 2024 SeB (sebba@end.ro) - S/V Haimana 264900475
+ * 
+ * Plugin page:
+ * 
+ * https://github.com/haimana/signalk-ble-heater
+ * 
+ * For making this, I used info and/or parts of code from:
+ * https://github.com/htool/jbd-overkill-bms-plugin.git
+ *    and
+ * https://github.com/spin877/Bruciatore_BLE.git
+ * https://github.com/iotmaestro/vevor-heater-ble.git
+ * https://github.com/bderleta/vevor-ble-bridge.git
+ *
+ * Many thanks for developers
+ * 
+ * ---------------------------------------------------------------------
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * 
+*/
+
+
 const id = "signalk-ble-heater";
 const debug = require('debug')(id)
 
