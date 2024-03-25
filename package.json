@@ -1,6 +1,6 @@
 {
   "name": "signalk-ble-heater",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "SignalK plugin for BLE Diesel Heater reading",
   "main": "index.js",
   "scripts": {
