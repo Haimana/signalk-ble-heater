@@ -127,7 +127,7 @@ module.exports = function (app, options) {
 				app.debug('Connecting...')
 				await device.connect()
 				const gattServer = await device.gatt()
-				app.debug('Got primary service.')
+				app.debug('Got primary service. ',gattServer)
 
 				// serviceUUID
 				const service = await gattServer.getPrimaryService(serviceUUID)
@@ -136,7 +136,7 @@ module.exports = function (app, options) {
 				RxTx = await service.getCharacteristic(characteristicUUID)
 
 				await RxTx.startNotifications()
-				app.debug('Notifications started.')
+				app.debug('Notifications started. ', RxTx)
 
 				// Sending delta
 				RxTx.on('valuechanged', buffer => { sendDelta(processData(buffer.toArrayInteger())) })
@@ -167,14 +167,12 @@ module.exports = function (app, options) {
 				obj.errorcode = Number(toU8(rawData[4]))
 				obj.runningstate = byteToStatus(rawData[5])
 				obj.altitude = Number(toU16(rawData[6], rawData[7]))
-				obj.opertionalmode = Number(toU8(rawData[8]))
+				obj.operationalmode = Number(toU8(rawData[8]))
 				obj.targettemp = Number(celsiusToKelvin(rawData[9]))
 				obj.powerlevel = Number(toU8(rawData[10]))
 				obj.supplyvoltage = Number(byteToFloat(rawData[11], 0.1)) //deciVolts to Volts
 				obj.heatingchambertemp = Number(celsiusToKelvin(rawData[13]))
-				// what is in [14]?
 				obj.roomtemp = Number(celsiusToKelvin(rawData[15]))
-				// what is in [16]?
 				obj.errcode2 = Number(toU8(rawData[17]))
 				// app.debug('processData obj:', obj)
 				return obj
