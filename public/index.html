@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Diesel Heater</title>
+<!--
+  Deliberately old-fashioned: XMLHttpRequest instead of fetch, flexbox instead
+  of grid, no template literals, hex colours only. The Navico proxy downlevels
+  modern CSS for the MFD browser, which tells us how old it is.
+-->
+<style>
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+  margin: 0; padding: 8px;
+  font-family: Helvetica, Arial, sans-serif;
+  background: #14181d; color: #e8edf2;
+  -webkit-user-select: none; user-select: none;
+}
+.bar {
+  display: -webkit-box; display: flex;
+  -webkit-box-align: center; align-items: center;
+  -webkit-box-pack: justify; justify-content: space-between;
+  padding: 6px 10px; margin-bottom: 8px;
+  background: #1d232a; border-radius: 6px; min-height: 44px;
+}
+.bar .state { font-size: 20px; font-weight: bold; }
+.bar .link { font-size: 13px; color: #8b99a7; }
+.fault { background: #5a1d1d; color: #ffd9d9; }
+.row { display: -webkit-box; display: flex; }
+.main { margin-bottom: 8px; }
+.power {
+  -webkit-box-flex: 0; flex: 0 0 34%;
+  margin-right: 8px; border: none; border-radius: 8px;
+  background: #2a333d; color: #e8edf2;
+  font-size: 30px; font-weight: bold; min-height: 190px;
+}
+.power.on { background: #1f6b3a; }
+.power:disabled { opacity: 0.4; }
+.panel {
+  -webkit-box-flex: 1; flex: 1 1 auto;
+  background: #1d232a; border-radius: 8px; padding: 10px;
+}
+.modes { display: -webkit-box; display: flex; margin-bottom: 10px; }
+.modes button {
+  -webkit-box-flex: 1; flex: 1 1 0; margin-right: 6px;
+  padding: 12px 4px; border: 2px solid #2f3a45; border-radius: 6px;
+  background: #232b33; color: #b9c5d1; font-size: 16px;
+}
+.modes button:last-child { margin-right: 0; }
+.modes button.sel { border-color: #4b93d1; color: #ffffff; background: #24405a; }
+.setpoint {
+  display: -webkit-box; display: flex;
+  -webkit-box-align: center; align-items: center;
+}
+.setpoint button {
+  width: 78px; height: 96px; border: none; border-radius: 8px;
+  background: #2a333d; color: #e8edf2; font-size: 40px; font-weight: bold;
+}
+.setpoint button:disabled { opacity: 0.35; }
+.setpoint .value {
+  -webkit-box-flex: 1; flex: 1 1 auto; text-align: center;
+  font-size: 54px; font-weight: bold;
+}
+.setpoint .value small { display: block; font-size: 13px; color: #8b99a7; font-weight: normal; }
+.readouts { display: -webkit-box; display: flex; }
+.cell {
+  -webkit-box-flex: 1; flex: 1 1 0; margin-right: 8px;
+  background: #1d232a; border-radius: 6px; padding: 8px 10px; text-align: center;
+}
+.cell:last-child { margin-right: 0; }
+.cell .k { font-size: 12px; color: #8b99a7; }
+.cell .v { font-size: 24px; font-weight: bold; }
+.toast {
+  position: fixed; left: 8px; right: 8px; bottom: 8px;
+  padding: 12px; border-radius: 6px; background: #5a1d1d; color: #ffe2e2;
+  font-size: 16px; text-align: center; display: none;
+}
+.nav {
+  display: -webkit-box; display: flex; margin-bottom: 8px;
+}
+.nav a {
+  -webkit-box-flex: 1; flex: 1 1 0;
+  text-align: center; text-decoration: none;
+  padding: 12px 6px; margin-right: 6px;
+  border-radius: 6px; background: #1d232a; color: #8b99a7; font-size: 16px;
+}
+.nav a:last-child { margin-right: 0; }
+.nav a.on { background: #24405a; color: #ffffff; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a class="on" href="index.html">Control</a>
+  <a href="diagnostics.html">Diagnostics</a>
+</div>
+
+<div class="bar" id="bar">
+  <span class="state" id="state">Connecting…</span>
+  <span class="link" id="link"></span>
+</div>
+
+<div class="row main">
+  <button class="power" id="power" disabled>OFF</button>
+  <div class="panel">
+    <div class="modes">
+      <button id="modeLevel">Power level</button>
+      <button id="modeTemp">Temperature</button>
+    </div>
+    <div class="setpoint">
+      <button id="down" disabled>&minus;</button>
+      <div class="value"><span id="setpoint">--</span><small id="setpointLabel">setpoint</small></div>
+      <button id="up" disabled>+</button>
+    </div>
+  </div>
+</div>
+
+<div class="readouts">
+  <div class="cell"><div class="k">Cabin</div><div class="v" id="cabin">--</div></div>
+  <div class="cell"><div class="k">Chamber</div><div class="v" id="chamber">--</div></div>
+  <div class="cell"><div class="k">Supply</div><div class="v" id="voltage">--</div></div>
+  <div class="cell"><div class="k">Level</div><div class="v" id="level">--</div></div>
+</div>
+
+<div class="readouts" style="margin-top:8px;">
+  <div class="cell"><div class="k">Fuel</div><div class="v" id="fuelRate">--</div></div>
+  <div class="cell"><div class="k">Today</div><div class="v" id="fuelToday">--</div></div>
+  <div class="cell"><div class="k">Tank</div><div class="v" id="tankLeft">--</div></div>
+  <div class="cell"><div class="k">Pump</div><div class="v" id="pumpLabel">--</div></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var MODE_LEVEL = 1;
+  var MODE_TEMP = 2;
+  var LEVEL_MIN = 1, LEVEL_MAX = 10;
+  var TEMP_MIN = 8, TEMP_MAX = 36;
+  var KELVIN = 273.15;
+
+  // Injected by signalk-navico-embedder into pages it proxies to the MFD.
+  // On a normal browser the Signal K session cookie is used instead.
+  var token = window.SK_TOKEN || null;
+  var base = '/signalk/v1/api/vessels/self/electrical/heaters/';
+  var heaterId = null;
+  var data = {};
+  var busy = false;
+  var pollTimer = null;
+
+  function el(id) { return document.getElementById(id); }
+
+  function request(method, url, body, cb) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    if (token) { xhr.setRequestHeader('Authorization', 'Bearer ' + token); }
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) { return; }
+      var parsed = null;
+      try { parsed = JSON.parse(xhr.responseText); } catch (e) { parsed = null; }
+      cb(xhr.status, parsed);
+    };
+    xhr.send(body ? JSON.stringify(body) : null);
+  }
+
+  function toast(message) {
+    var node = el('toast');
+    node.textContent = message;
+    node.style.display = 'block';
+    window.setTimeout(function () { node.style.display = 'none'; }, 4000);
+  }
+
+  function celsius(kelvin) {
+    if (kelvin === null || kelvin === undefined) { return null; }
+    return Math.round((kelvin - KELVIN) * 10) / 10;
+  }
+
+  function show(id, value, suffix) {
+    el(id).textContent = (value === null || value === undefined) ? '--' : value + (suffix || '');
+  }
+
+  // Mirrors the plugin's own rules, which come from the heater's behaviour:
+  // it ignores a stop while cooling down and only starts from standby.
+  function canStart() { return data.runningState === 'Standby'; }
+  function canStop() {
+    return data.runningState === 'Self-test' || data.runningState === 'Ignition' ||
+           data.runningState === 'Running';
+  }
+  function canSetTarget() { return data.runningState !== 'Cooldown'; }
+
+  function setpointValue() {
+    if (data.mode === MODE_TEMP) { return celsius(data.targetTemperature); }
+    return (data.powerLevel === null || data.powerLevel === undefined) ? null : data.powerLevel;
+  }
+
+  function render() {
+    var faulted = data.powerStatus === 'error' || !!data.errorCode || !!data.errorMessage || !!data.lastErrorMessage;
+    el('bar').className = faulted ? 'bar fault' : 'bar';
+    el('bar').style.background = '';
+
+    var label = data.runningState || 'Unknown';
+    var faultText = data.errorMessage || data.lastErrorMessage;
+    if (faultText) {
+      label += ' — ' + (data.errorLabel ? data.errorLabel + ' ' : '') + faultText;
+    }
+    el('state').textContent = label;
+
+    var power = el('power');
+    power.textContent = data.state ? 'ON' : 'OFF';
+    power.className = data.state ? 'power on' : 'power';
+    power.disabled = busy || !(data.state ? canStop() : canStart());
+
+    el('modeLevel').className = data.mode === MODE_LEVEL ? 'sel' : '';
+    el('modeTemp').className = data.mode === MODE_TEMP ? 'sel' : '';
+
+    var isTemp = data.mode === MODE_TEMP;
+    var value = setpointValue();
+    show('setpoint', value, isTemp ? '\u00b0' : '');
+    el('setpointLabel').textContent = isTemp ? 'target \u00b0C' : 'power level';
+    el('up').disabled = busy || !canSetTarget();
+    el('down').disabled = busy || !canSetTarget();
+
+    show('cabin', celsius(data.roomTemperature), '\u00b0');
+    show('chamber', celsius(data.temperature), '\u00b0');
+    show('voltage', data.voltage === null || data.voltage === undefined ? null : data.voltage.toFixed(1), 'V');
+    show('level', data.currentPowerLevel);
+
+    var rateL = data.fuelRate == null ? null : Number(data.fuelRate) * 1000 * 3600;
+    var todayL = data.fuelConsumedToday == null ? null : Number(data.fuelConsumedToday) * 1000;
+    show('fuelRate', rateL === null ? null : rateL.toFixed(2), 'L/h');
+    show('fuelToday', todayL === null ? null : todayL.toFixed(2), 'L');
+    if (data.separateTank && data.fuelRemaining != null) {
+      show('tankLeft', (Number(data.fuelRemaining) * 1000).toFixed(1), 'L');
+    } else {
+      el('tankLeft').textContent = 'main';
+    }
+    var pumpMap = { 0: '16µL', 1: '22µL', 2: '28µL', 3: '32µL' };
+    el('pumpLabel').textContent = pumpMap[data.pumpType] || '--';
+  }
+
+  // A PUT handled asynchronously answers 202 with a request to poll, so the UI
+  // waits for the heater's real answer instead of assuming success.
+  function followRequest(href, tries, done) {
+    if (tries <= 0) { done(504, null); return; }
+    window.setTimeout(function () {
+      request('GET', href, null, function (status, body) {
+        if (body && body.state === 'PENDING') {
+          followRequest(href, tries - 1, done);
+        } else {
+          done(body && body.statusCode ? body.statusCode : status, body);
+        }
+      });
+    }, 300);
+  }
+
+  function put(key, value) {
+    if (!heaterId || busy) { return; }
+    busy = true;
+    render();
+    request('PUT', base + heaterId + '/' + key, { value: value }, function (status, body) {
+      var finish = function (code, payload) {
+        busy = false;
+        if (code >= 400) {
+          toast((payload && payload.message) ? payload.message : 'Command refused (' + code + ')');
+        }
+        snapshot();
+      };
+      if (status === 202 && body && body.href) {
+        followRequest(body.href, 20, finish);
+      } else {
+        finish(body && body.statusCode ? body.statusCode : status, body);
+      }
+    });
+  }
+
+  function step(delta) {
+    var isTemp = data.mode === MODE_TEMP;
+    var current = setpointValue();
+    if (current === null) { current = isTemp ? 20 : 3; }
+    var next = current + delta;
+    var min = isTemp ? TEMP_MIN : LEVEL_MIN;
+    var max = isTemp ? TEMP_MAX : LEVEL_MAX;
+    if (next < min) { next = min; }
+    if (next > max) { next = max; }
+    if (next === current) { return; }
+    put(isTemp ? 'targetTemperature' : 'powerLevel', isTemp ? next + KELVIN : next);
+  }
+
+  function absorb(tree) {
+    var keys = ['state', 'powerStatus', 'runningState', 'mode', 'targetTemperature',
+                'powerLevel', 'currentPowerLevel', 'temperature', 'voltage',
+                'roomTemperature', 'displayErrorCode', 'errorCode', 'errorMessage',
+                'errorLabel', 'lastErrorMessage',
+                'pumpType', 'fuelRate', 'fuelConsumedToday', 'separateTank', 'fuelRemaining'];
+    for (var i = 0; i < keys.length; i++) {
+      var node = tree[keys[i]];
+      if (node && typeof node === 'object' && 'value' in node) { data[keys[i]] = node.value; }
+    }
+    render();
+  }
+
+  function snapshot() {
+    if (!heaterId) { return; }
+    request('GET', base + heaterId + '/', null, function (status, body) {
+      if (status === 200 && body) { absorb(body); }
+      else if (status === 401 || status === 403) { el('link').textContent = 'login required'; }
+    });
+  }
+
+  function startPolling() {
+    if (pollTimer) { return; }
+    el('link').textContent = 'polling';
+    pollTimer = window.setInterval(snapshot, 3000);
+  }
+
+  function openStream() {
+    if (!window.WebSocket) { startPolling(); return; }
+    var scheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var url = scheme + window.location.host + '/signalk/v1/stream?subscribe=none';
+    if (token) { url += '&token=' + encodeURIComponent(token); }
+
+    var ws;
+    try { ws = new WebSocket(url); } catch (e) { startPolling(); return; }
+
+    ws.onopen = function () {
+      el('link').textContent = 'live';
+      ws.send(JSON.stringify({
+        context: 'vessels.self',
+        subscribe: [{ path: 'electrical.heaters.' + heaterId + '.*', policy: 'instant' }]
+      }));
+    };
+    ws.onmessage = function (event) {
+      var message;
+      try { message = JSON.parse(event.data); } catch (e) { return; }
+      if (!message.updates) { return; }
+      var prefix = 'electrical.heaters.' + heaterId + '.';
+      var touched = false;
+      for (var u = 0; u < message.updates.length; u++) {
+        var values = message.updates[u].values || [];
+        for (var v = 0; v < values.length; v++) {
+          if (values[v].path && values[v].path.indexOf(prefix) === 0) {
+            data[values[v].path.substring(prefix.length)] = values[v].value;
+            touched = true;
+          }
+        }
+      }
+      if (touched) {
+        render();
+      }
+    };
+    ws.onclose = function () { startPolling(); };
+    ws.onerror = function () { startPolling(); };
+  }
+
+  // The zone name for the cabin temperature is configurable, so the UI reads
+  // everything from the heater's own tree and discovers its id here.
+  function discover() {
+    request('GET', base, null, function (status, body) {
+      if (status === 401 || status === 403) {
+        el('state').textContent = 'Signal K login required';
+        return;
+      }
+      if (status !== 200 || !body) {
+        el('state').textContent = 'Heater not found in Signal K';
+        window.setTimeout(discover, 5000);
+        return;
+      }
+      var ids = [];
+      for (var key in body) {
+        if (Object.prototype.hasOwnProperty.call(body, key)) { ids.push(key); }
+      }
+      if (!ids.length) {
+        el('state').textContent = 'No heater published yet';
+        window.setTimeout(discover, 5000);
+        return;
+      }
+      heaterId = ids[0];
+      document.title = 'Heater ' + heaterId;
+      snapshot();
+      openStream();
+    });
+  }
+
+  el('power').onclick = function () { put('state', !data.state); };
+  el('modeLevel').onclick = function () { put('mode', MODE_LEVEL); };
+  el('modeTemp').onclick = function () { put('mode', MODE_TEMP); };
+  el('up').onclick = function () { step(1); };
+  el('down').onclick = function () { step(-1); };
+
+  discover();
+})();
+</script>
+</body>
+</html>

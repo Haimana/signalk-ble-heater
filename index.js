@@ -1,19 +1,17 @@
 /*
- * Copyright 2024 SeB (sebba@end.ro) - S/V Haimana 264900475
- * 
- * Plugin page:
- * 
- * https://github.com/haimana/signalk-ble-heater
- * 
- * For making this, I used info and/or parts of code from:
- * https://github.com/htool/jbd-overkill-bms-plugin.git
- *    and
- * https://github.com/spin877/Bruciatore_BLE.git
- * https://github.com/iotmaestro/vevor-heater-ble.git
- * https://github.com/bderleta/vevor-ble-bridge.git
+ * Copyright 2024-2026 SeB (sebba@end.ro) - S/V Haimana 264900475
  *
- * Many thanks for developers
- * 
+ * https://github.com/Haimana/signalk-ble-heater
+ *
+ * Reads and controls a Vevor-style BLE diesel heater from Signal K.
+ * Protocol details and prior art:
+ *   https://github.com/iotmaestro/vevor-heater-ble
+ *   https://github.com/bderleta/vevor-ble-bridge
+ *   https://github.com/spin877/Bruciatore_BLE
+ *   https://github.com/htool/jbd-overkill-bms-plugin
+ *
+ * Many thanks to those developers.
+ *
  * ---------------------------------------------------------------------
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,280 +19,901 @@
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
-
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * 
-*/
+ */
 
+'use strict'
 
-const id = "signalk-ble-heater";
-const debug = require('debug')(id)
+const protocol = require('./lib/protocol')
+const { HeaterSession } = require('./lib/heater')
+const fuel = require('./lib/fuel')
 
-module.exports = function (app, options) {
-	"use strict"
-	var plugin = {}
-	const serviceUUID = '0000ffe0-0000-1000-8000-00805f9b34fb'
-	const characteristicUUID = '0000ffe1-0000-1000-8000-00805f9b34fb'
-	var RxTx
-	var device
-	var adapter
-	var pollInterval;
-	var intervalId;
+const KELVIN_OFFSET = 273.15
+const FUEL_SAVE_EVERY_MS = 60000
 
-	let stopped = Promise.resolve()
+module.exports = function (app) {
+  const plugin = {
+    id: 'signalk-ble-heater',
+    name: 'BLE Diesel Heater',
+    description: 'Read and control a Vevor-style BLE diesel heater'
+  }
 
-	plugin.id = id
-	plugin.name = "Signalk plugin for BLE Diesel Heater readout"
-	plugin.description = "Read Diesel Heater values over bluetooth"
+  let session = null
+  let deviceId = 'dieselHeater'
+  let zone = 'cabin'
+  let alarmState = null
+  let pluginOptions = {}
+  let fuelTracker = null
+  let lastFuelSaveAt = 0
+  let stickyFault = null
+  let temperatureOffset = 0
+  let autoStartStop = false
+  let backlight = 5
+  let syncSettingsOnConnect = false
 
-	var unsubscribes = []
+  plugin.schema = {
+    type: 'object',
+    title: 'Heater settings',
+    properties: {
+      id: {
+        type: 'string',
+        title: 'Heater id',
+        description: 'Used in electrical.heaters.<id>.*',
+        default: 'dieselHeater'
+      },
+      zone: {
+        type: 'string',
+        title: 'Cabin zone name',
+        description: 'Room temperature is published as environment.inside.<zone>.temperature',
+        default: 'cabin'
+      },
+      MAC: {
+        type: 'string',
+        title: 'Heater BLE MAC address'
+      },
+      password: {
+        type: 'string',
+        title: 'Heater BLE password',
+        description: 'Four digits, as used by the AirHeaterBLE app. Default for most units is 1234.',
+        default: '1234'
+      },
+      pollFrequency: {
+        type: 'number',
+        title: 'Poll frequency in seconds',
+        default: 15,
+        minimum: 2
+      },
+      pumpType: {
+        type: 'string',
+        title: 'Fuel pump type',
+        description: 'Volume per pump pulse (LCD F7 / cmd 17). Used to estimate diesel use.',
+        default: '1',
+        enum: ['0', '1', '2', '3'],
+        enumNames: ['16 µL/pulse', '22 µL/pulse (common)', '28 µL/pulse', '32 µL/pulse']
+      },
+      tankSource: {
+        type: 'string',
+        title: 'Fuel tank',
+        description:
+          'Boat main tank = unlimited (no remaining estimate). Or pick a dedicated heater tank size (LCD F6).',
+        default: 'main',
+        enum: ['main', '5', '10', '15', '20', '25', '30', '35', '40', '45', '50'],
+        enumNames: [
+          'Boat main tank (unlimited)',
+          'Separate 5 L',
+          'Separate 10 L',
+          'Separate 15 L',
+          'Separate 20 L',
+          'Separate 25 L',
+          'Separate 30 L',
+          'Separate 35 L',
+          'Separate 40 L',
+          'Separate 45 L',
+          'Separate 50 L'
+        ]
+      },
+      temperatureOffset: {
+        type: 'number',
+        title: 'Cabin temperature offset (°C)',
+        description: 'LCD F5 / cmd 20. Positive raises the reading the heater uses.',
+        default: 0,
+        minimum: -9,
+        maximum: 9
+      },
+      autoStartStop: {
+        type: 'boolean',
+        title: 'Automatic start/stop',
+        description:
+          'LCD F9 / cmd 18. In temperature mode the heater stops ~30s after reaching target and restarts 2°C below.',
+        default: false
+      },
+      backlight: {
+        type: 'number',
+        title: 'Controller backlight',
+        description: 'Cmd 21. 0 = off, typically 1–100.',
+        default: 5,
+        minimum: 0,
+        maximum: 100
+      },
+      syncSettingsOnConnect: {
+        type: 'boolean',
+        title: 'Push settings to heater on connect',
+        description:
+          'Sends English, Celsius, metres, pump type, tank mode, offset, auto start/stop, backlight and clock.',
+        default: false
+      }
+    }
+  }
 
-	var schema = {
-		type: "object",
-		title: "Heater settings",
-		properties: {
-			heaterInstance: {
-				type: 'string',
-				title: 'Heater instance/name to use',
-				default: "heater"
-			},
-			pollFrequency: {
-				title: "Poll frequency in seconds",
-				type: "number",
-				default: 10
-			},
-			MAC: {
-				title: "Heater BLE MAC address",
-				type: "string"
-			}
-		}
-	}
+  function heaterPath(key) {
+    return `electrical.heaters.${deviceId}.${key}`
+  }
 
-	plugin.schema = function () {
-		return schema
-	}
+  // Schema uses string enums so the Signal K admin form accepts them. Legacy
+  // separateTank / tankCapacityLiters configs are still honoured.
+  function resolveTankSource(opts) {
+    if (opts.tankSource === 'main' || opts.tankSource === 0 || opts.tankSource === '0') {
+      return 'main'
+    }
+    if (opts.tankSource !== undefined && opts.tankSource !== null && opts.tankSource !== '') {
+      const liters = fuel.litersFromTankIndex(fuel.tankIndexFromLiters(opts.tankSource))
+      if (liters) {
+        return String(liters)
+      }
+    }
+    if (opts.separateTank === true) {
+      const liters = fuel.litersFromTankIndex(fuel.tankIndexFromLiters(opts.tankCapacityLiters)) || 5
+      return String(liters)
+    }
+    return 'main'
+  }
 
+  function applyTankSource(tracker, source) {
+    if (!tracker) {
+      return
+    }
+    if (source === 'main') {
+      tracker.setSeparateTank(false)
+    } else {
+      tracker.setSeparateTank(true, Number(source))
+    }
+  }
 
+  function toKelvin(celsius) {
+    return celsius === null || celsius === undefined ? null : celsius + KELVIN_OFFSET
+  }
 
-	plugin.start = async (options) => {
-		// app.debug('Starting plugin');
-		stopped.then(() => {
-			app.debug('Starting plugin');
-			app.debug('Options: %j', JSON.stringify(options));
-			unsubscribes.push(pullData);
+  function litersToCubicMetres(liters) {
+    return liters === null || liters === undefined ? null : liters / 1000
+  }
 
-			const macAddress = options.MAC
+  function sendDeltas(values, meta) {
+    const update = { values }
+    if (meta && meta.length) {
+      update.meta = meta
+    }
+    app.handleMessage(plugin.id, { updates: [update] })
+  }
 
-			const common = [0xaa, 0x55, 0x0c, 0x22]
-			const ping = [...common, 0x01, 0x00, 0x00] // Ping, readonly device status request
+  function publishMeta() {
+    const label = deviceId
+    sendDeltas([], [
+      {
+        path: heaterPath('state'),
+        value: { description: 'Heater on/off', displayName: `${label} on/off` }
+      },
+      { path: heaterPath('powerStatus'), value: { description: 'off, running or error' } },
+      {
+        path: heaterPath('runningState'),
+        value: { description: 'Standby, Self-test, Ignition, Running or Cooldown' }
+      },
+      {
+        path: heaterPath('mode'),
+        value: {
+          description: 'Heater control mode',
+          displayName: `${label} mode`,
+          type: 'multiple',
+          possibleValues: [
+            { value: protocol.MODE.POWER_LEVEL, label: 'Power level', abbrev: 'Level' },
+            { value: protocol.MODE.TEMPERATURE, label: 'Temperature', abbrev: 'Temp' }
+          ]
+        }
+      },
+      {
+        path: heaterPath('targetTemperature'),
+        value: { description: 'Target cabin temperature', displayName: `${label} target`, units: 'K' }
+      },
+      {
+        path: heaterPath('powerLevel'),
+        value: { description: 'Target power level, 1 to 10', displayName: `${label} level` }
+      },
+      {
+        path: heaterPath('currentPowerLevel'),
+        value: { description: 'Power level the heater is currently running at' }
+      },
+      { path: heaterPath('temperature'), value: { description: 'Combustion chamber temperature', units: 'K' } },
+      {
+        path: heaterPath('roomTemperature'),
+        value: { description: 'Cabin temperature measured by the heater', units: 'K' }
+      },
+      { path: heaterPath('voltage'), value: { description: 'Supply voltage measured by the heater', units: 'V' } },
+      { path: heaterPath('altitude'), value: { description: 'Altitude reported by the heater', units: 'm' } },
+      { path: heaterPath('errorCode'), value: { description: 'Controller fault code (byte 4)' } },
+      { path: heaterPath('displayErrorCode'), value: { description: 'Display fault code when present' } },
+      { path: heaterPath('errorMessage'), value: { description: 'Decoded heater fault text, if any' } },
+      { path: heaterPath('errorLabel'), value: { description: 'LCD-style fault label such as E02' } },
+      {
+        path: heaterPath('lastErrorMessage'),
+        value: { description: 'Most recent fault text, kept after the heater clears it' }
+      },
+      { path: heaterPath('runningStepCode'), value: { description: 'Raw running-step byte 0-4' } },
+      { path: heaterPath('powerStatusCode'), value: { description: 'Raw power-status byte 0-2' } },
+      { path: heaterPath('frameLength'), value: { description: 'Last BLE status frame length in bytes' } },
+      { path: heaterPath('protocolVariant'), value: { description: 'Protocol variant byte (usually 0x55)' } },
+      {
+        path: heaterPath('pumpType'),
+        value: {
+          description: 'Fuel pump type 0-3 (16/22/28/32 µL per pulse)',
+          displayName: `${label} pump type`,
+          type: 'multiple',
+          possibleValues: [
+            { value: 0, label: '16 µL/pulse', abbrev: '16' },
+            { value: 1, label: '22 µL/pulse', abbrev: '22' },
+            { value: 2, label: '28 µL/pulse', abbrev: '28' },
+            { value: 3, label: '32 µL/pulse', abbrev: '32' }
+          ]
+        }
+      },
+      {
+        path: heaterPath('separateTank'),
+        value: {
+          description: 'True when a dedicated heater tank is used; false draws from the boat main tank',
+          displayName: `${label} separate tank`
+        }
+      },
+      {
+        path: heaterPath('tankCapacity'),
+        value: { description: 'Separate heater tank capacity', units: 'm3' }
+      },
+      {
+        path: heaterPath('fuelRemaining'),
+        value: { description: 'Estimated fuel left in the separate tank, if any', units: 'm3' }
+      },
+      {
+        path: heaterPath('fuelConsumedSinceRefuel'),
+        value: { description: 'Estimated fuel used since last refuel reset', units: 'm3' }
+      },
+      { path: heaterPath('pumpPulseRate'), value: { description: 'Estimated fuel-pump pulse rate', units: 'Hz' } },
+      {
+        path: heaterPath('fuelRate'),
+        value: { description: 'Estimated diesel consumption rate', units: 'm3/s' }
+      },
+      { path: heaterPath('fuelConsumed'), value: { description: 'Estimated diesel consumed since last total reset', units: 'm3' } },
+      {
+        path: heaterPath('fuelConsumedToday'),
+        value: { description: 'Estimated diesel consumed today (UTC day)', units: 'm3' }
+      },
+      { path: heaterPath('pumpPulses'), value: { description: 'Estimated pump pulse count since last reset' } },
+      {
+        path: heaterPath('temperatureOffset'),
+        value: { description: 'Cabin temperature compensation in °C', displayName: `${label} offset` }
+      },
+      {
+        path: heaterPath('autoStartStop'),
+        value: {
+          description: 'Heater automatic start/stop around the temperature target',
+          displayName: `${label} auto`
+        }
+      },
+      {
+        path: heaterPath('backlight'),
+        value: { description: 'Controller backlight level 0-100', displayName: `${label} backlight` }
+      },
+      {
+        path: heaterPath('refuel'),
+        value: {
+          description: 'PUT true after filling the separate tank to reset remaining fuel',
+          displayName: `${label} refuel`
+        }
+      },
+      {
+        path: heaterPath('syncTime'),
+        value: {
+          description: 'PUT true to push the Signal K host clock to the heater',
+          displayName: `${label} sync time`
+        }
+      },
+      {
+        path: `environment.inside.${zone}.temperature`,
+        value: { description: 'Cabin temperature measured by the heater', units: 'K' }
+      }
+    ])
+  }
 
-			pollInterval = options.pollFrequency * 1000
-			const basePath = "environment.inside." + options.heaterInstance
+  function publishFuel(snapshot) {
+    sendDeltas([
+      { path: heaterPath('pumpType'), value: snapshot.pumpType },
+      { path: heaterPath('separateTank'), value: snapshot.separateTank },
+      { path: heaterPath('tankCapacity'), value: litersToCubicMetres(snapshot.tankCapacityLiters) },
+      { path: heaterPath('fuelRemaining'), value: litersToCubicMetres(snapshot.fuelRemaining) },
+      {
+        path: heaterPath('fuelConsumedSinceRefuel'),
+        value: litersToCubicMetres(snapshot.fuelConsumedSinceRefuel)
+      },
+      { path: heaterPath('pumpPulseRate'), value: snapshot.pulseRate },
+      { path: heaterPath('fuelRate'), value: litersToCubicMetres(snapshot.fuelRate) / 3600 },
+      { path: heaterPath('fuelConsumed'), value: litersToCubicMetres(snapshot.fuelConsumed) },
+      {
+        path: heaterPath('fuelConsumedToday'),
+        value: litersToCubicMetres(snapshot.fuelConsumedToday)
+      },
+      { path: heaterPath('pumpPulses'), value: Math.round(snapshot.pumpPulses) },
+      { path: heaterPath('temperatureOffset'), value: temperatureOffset },
+      { path: heaterPath('autoStartStop'), value: autoStartStop },
+      { path: heaterPath('backlight'), value: backlight },
+      { path: heaterPath('refuel'), value: false },
+      { path: heaterPath('syncTime'), value: false }
+    ])
+  }
 
-			function addHash(array) {
-				let suma = array.slice(2, 7).reduce((acc, curr) => acc + curr, 0);
-				let hash = suma % 256;
-				let arrayWithHash = [...array, hash];
-				return arrayWithHash;
-			}
+  function saveFuelState(force) {
+    if (!fuelTracker) {
+      return
+    }
+    const now = Date.now()
+    if (!force && now - lastFuelSaveAt < FUEL_SAVE_EVERY_MS) {
+      return
+    }
+    lastFuelSaveAt = now
+    const snap = fuelTracker.persistable()
+    // Only refresh fuel / tank / pump fields. Admin-form settings
+    // (autoStartStop, syncSettingsOnConnect, …) stay as last loaded or PUT.
+    // Forcing them from memory here races with Server → Plugin Config → Save.
+    pluginOptions = Object.assign({}, pluginOptions, {
+      totalLiters: snap.totalLiters,
+      dailyLiters: snap.dailyLiters,
+      dailyDate: snap.dailyDate,
+      totalPulses: snap.totalPulses,
+      consumedSinceRefuel: snap.consumedSinceRefuel,
+      pumpType: String(snap.pumpType),
+      tankSource: snap.separateTank ? String(snap.tankCapacityLiters) : 'main'
+    })
+    delete pluginOptions.separateTank
+    delete pluginOptions.tankCapacityLiters
+    delete pluginOptions.primeDuration
+    delete pluginOptions.primeCommand
+    app.savePluginOptions(pluginOptions, (err) => {
+      if (err) {
+        app.debug('Could not save plugin state: %s', err.message)
+      }
+    })
+  }
 
-			Buffer.prototype.toArrayInteger = function () {
-				if (this.length > 0) {
-					const data = new Array(this.length);
-					for (let i = 0; i < this.length; i = i + 1)
-						data[i] = this[i];
-					return data;
-				}
-				return [];
-			}
+  function publishStatus(status) {
+    const live = !status.standby
 
-			async function init() {
-				const { createBluetooth } = require('node-ble')
-				const { bluetooth, destroy } = createBluetooth()
+    if (status.errorMessage) {
+      stickyFault = {
+        code: status.errorCode || status.displayErrorCode,
+        message: status.errorMessage,
+        at: Date.now()
+      }
+    } else if (status.runningStepCode === 3) {
+      stickyFault = null
+    }
 
-				adapter = await bluetooth.defaultAdapter()
+    const lastErrorMessage = status.errorMessage || (stickyFault && stickyFault.message) || null
 
-				app.debug('Waiting for Discovering...')
-				if (! await adapter.isDiscovering())
-					await adapter.startDiscovery()
+    sendDeltas([
+      { path: heaterPath('state'), value: status.state },
+      { path: heaterPath('powerStatus'), value: status.powerStatus },
+      { path: heaterPath('runningState'), value: status.runningState },
+      { path: heaterPath('mode'), value: status.mode },
+      { path: heaterPath('targetTemperature'), value: toKelvin(status.targetTemperature) },
+      { path: heaterPath('powerLevel'), value: status.powerLevel },
+      { path: heaterPath('currentPowerLevel'), value: live ? status.currentPowerLevel : null },
+      { path: heaterPath('temperature'), value: live ? toKelvin(status.chamberTemperature) : null },
+      { path: heaterPath('voltage'), value: live ? status.voltage : null },
+      { path: heaterPath('altitude'), value: live ? status.altitude : null },
+      { path: heaterPath('errorCode'), value: status.errorCode },
+      { path: heaterPath('displayErrorCode'), value: status.displayErrorCode },
+      { path: heaterPath('errorMessage'), value: status.errorMessage },
+      { path: heaterPath('errorLabel'), value: status.errorLabel },
+      { path: heaterPath('lastErrorMessage'), value: lastErrorMessage },
+      { path: heaterPath('runningStepCode'), value: status.runningStepCode },
+      { path: heaterPath('powerStatusCode'), value: status.powerStatusCode },
+      { path: heaterPath('frameLength'), value: status.frameLength },
+      { path: heaterPath('protocolVariant'), value: status.variant },
+      { path: heaterPath('roomTemperature'), value: toKelvin(status.roomTemperature) },
+      { path: `environment.inside.${zone}.temperature`, value: toKelvin(status.roomTemperature) }
+    ])
 
-				device = await adapter.waitDevice(macAddress);
+    if (fuelTracker) {
+      publishFuel(fuelTracker.tick(status))
+      saveFuelState(false)
+    }
 
-				app.debug('Connecting...')
-				await device.connect()
-				const gattServer = await device.gatt()
-				app.debug('Got primary service. ',gattServer)
+    publishAlarm(status)
+    reportStatus(status, lastErrorMessage)
+  }
 
-				// serviceUUID
-				const service = await gattServer.getPrimaryService(serviceUUID)
+  function publishAlarm(status) {
+    const message = status.errorMessage
+    const next = message || 'normal'
+    if (next === alarmState) {
+      return
+    }
+    alarmState = next
+    sendDeltas([
+      {
+        path: `notifications.electrical.heaters.${deviceId}.error`,
+        value: message
+          ? { state: 'alarm', method: ['visual', 'sound'], message: `Heater: ${message}` }
+          : { state: 'normal', method: [], message: 'No heater fault' }
+      }
+    ])
+  }
 
-				// characteristicUUID 
-				RxTx = await service.getCharacteristic(characteristicUUID)
+  function reportStatus(status, faultMessage) {
+    const parts = [status.runningState]
+    if (faultMessage) {
+      parts.push(`(${faultMessage})`)
+    }
+    if (status.mode === protocol.MODE.TEMPERATURE && status.targetTemperature !== null) {
+      parts.push(`target ${status.targetTemperature}\u00b0C`)
+    } else if (status.powerLevel !== null) {
+      parts.push(`level ${status.powerLevel}`)
+    }
+    if (!status.standby) {
+      parts.push(`cabin ${status.roomTemperature}\u00b0C`)
+    }
+    if (fuelTracker) {
+      const snap = fuelTracker.snapshot()
+      if (snap.fuelRate > 0) {
+        parts.push(`${snap.fuelRate.toFixed(2)} L/h`)
+      }
+      if (snap.separateTank && snap.fuelRemaining !== null) {
+        parts.push(`${snap.fuelRemaining.toFixed(1)} L left`)
+      }
+    }
+    app.setPluginStatus(parts.join(' '))
+  }
 
-				await RxTx.startNotifications()
-				app.debug('Notifications started. ', RxTx)
+  async function pushSettingsToHeater() {
+    if (!session || !session.connected || !fuelTracker) {
+      return
+    }
+    const snap = fuelTracker.snapshot()
+    const jobs = [
+      [protocol.CMD.SET_LANGUAGE, protocol.LANGUAGE_ENGLISH],
+      [protocol.CMD.SET_TEMP_UNIT, protocol.TEMP_UNIT_CELSIUS],
+      [protocol.CMD.SET_ALTITUDE_UNIT, protocol.ALTITUDE_UNIT_METERS],
+      [protocol.CMD.SET_PUMP_TYPE, snap.pumpType],
+      [protocol.CMD.SET_TANK_VOLUME, snap.tankIndex],
+      [protocol.CMD.SET_OFFSET, temperatureOffset],
+      [protocol.CMD.SET_AUTO_START_STOP, autoStartStop ? 1 : 0],
+      [protocol.CMD.SET_BACKLIGHT, backlight],
+      [protocol.CMD.SYNC_TIME, protocol.encodeClockArgument()]
+    ]
+    for (const [cmd, value] of jobs) {
+      try {
+        await session.send(cmd, value)
+      } catch (err) {
+        app.debug('Settings sync cmd %s failed: %s', cmd, err.message)
+      }
+    }
+  }
 
-				// Sending delta
-				RxTx.on('valuechanged', buffer => { sendDelta(processData(buffer.toArrayInteger())) })
+  plugin.start = function (options) {
+    const opts = options || {}
+    pluginOptions = Object.assign({}, opts)
+    deviceId = opts.id || opts.heaterInstance || 'dieselHeater'
+    zone = opts.zone || 'cabin'
+    alarmState = null
+    stickyFault = null
+    temperatureOffset = Math.round(Number(opts.temperatureOffset) || 0)
+    if (temperatureOffset < protocol.OFFSET_RANGE.min) {
+      temperatureOffset = protocol.OFFSET_RANGE.min
+    }
+    if (temperatureOffset > protocol.OFFSET_RANGE.max) {
+      temperatureOffset = protocol.OFFSET_RANGE.max
+    }
+    autoStartStop = opts.autoStartStop === true
+    backlight = Math.round(Number(opts.backlight))
+    if (!Number.isFinite(backlight)) {
+      backlight = 5
+    }
+    backlight = Math.min(protocol.BACKLIGHT_RANGE.max, Math.max(protocol.BACKLIGHT_RANGE.min, backlight))
+    // Explicit true only — an unchecked admin checkbox must stay off after Save.
+    syncSettingsOnConnect = opts.syncSettingsOnConnect === true
+    pluginOptions.autoStartStop = autoStartStop
+    pluginOptions.syncSettingsOnConnect = syncSettingsOnConnect
+    pluginOptions.temperatureOffset = temperatureOffset
+    pluginOptions.backlight = backlight
 
-				intervalId = setInterval(function () { if (RxTx) { pullData(RxTx) } }, pollInterval)
+    const tankSource = resolveTankSource(opts)
+    fuelTracker = new fuel.FuelTracker({
+      pumpType: opts.pumpType,
+      separateTank: tankSource !== 'main',
+      tankCapacityLiters: tankSource === 'main' ? null : Number(tankSource),
+      totalLiters: opts.totalLiters,
+      dailyLiters: opts.dailyLiters,
+      dailyDate: opts.dailyDate,
+      totalPulses: opts.totalPulses,
+      consumedSinceRefuel: opts.consumedSinceRefuel
+    })
 
-			}
+    // Rewrite legacy tank fields into tankSource so the admin form validates.
+    if (
+      opts.tankSource !== tankSource ||
+      Object.prototype.hasOwnProperty.call(opts, 'separateTank') ||
+      Object.prototype.hasOwnProperty.call(opts, 'tankCapacityLiters') ||
+      typeof opts.pumpType === 'number'
+    ) {
+      pluginOptions = Object.assign({}, opts, {
+        tankSource,
+        pumpType: String(fuel.normalizePumpType(opts.pumpType))
+      })
+      delete pluginOptions.separateTank
+      delete pluginOptions.tankCapacityLiters
+      delete pluginOptions.primeDuration
+      delete pluginOptions.primeCommand
+      app.savePluginOptions(pluginOptions, (err) => {
+        if (err) {
+          app.debug('Could not migrate tank options: %s', err.message)
+        }
+      })
+    }
 
-			init()
+    if (!opts.id && opts.heaterInstance) {
+      const migrated = Object.assign({}, pluginOptions, { id: deviceId })
+      delete migrated.heaterInstance
+      pluginOptions = migrated
+      app.debug('Migrating heaterInstance "%s" to id', deviceId)
+      app.savePluginOptions(migrated, (err) => {
+        if (err) {
+          app.debug('Could not save migrated options: %s', err.message)
+        }
+      })
+    }
 
-			async function pullData(arg) {
-				app.debug("pullData");
+    const pollSeconds = Math.max(2, Number(opts.pollFrequency) || 15)
+    const snap = fuelTracker.snapshot()
+    app.debug(
+      'Starting: heater %s, zone %s, MAC %s, poll %ds, pump %s, tank %s',
+      deviceId,
+      zone,
+      opts.MAC,
+      pollSeconds,
+      snap.pumpLabel,
+      snap.separateTank ? `${snap.tankCapacityLiters} L` : 'boat main (infinite)'
+    )
 
-				if (arg && typeof arg.writeValue === 'function') {
-					const pingCMD = addHash(ping);
-					await arg.writeValue(Buffer.from(pingCMD));
-					// } else {
-					// 	// Tratează eroarea sau oferă o notificare corespunzătoare în funcție de necesități.
-					// 	app.debug("Stopping plugin - pullData don't run!");
-				}
-			}
+    publishMeta()
+    publishFuel(snap)
+    registerPutHandlers()
 
-			function processData(rawData) {
-				// app.debug('processData data:', rawData)
-				var obj = {}
-				obj.command = Number(toU8(rawData[2]))
-				obj.runstatus = byteToOnOff(rawData[3])
-				obj.errorcode = Number(toU8(rawData[4]))
-				obj.runningstate = byteToStatus(rawData[5])
-				obj.altitude = Number(toU16(rawData[6], rawData[7]))
-				obj.operationalmode = Number(toU8(rawData[8]))
-				obj.targettemp = Number(celsiusToKelvin(rawData[9]))
-				obj.powerlevel = Number(toU8(rawData[10]))
-				obj.supplyvoltage = Number(byteToFloat(rawData[11], 0.1)) //deciVolts to Volts
-				obj.heatingchambertemp = Number(celsiusToKelvin(rawData[13]))
-				obj.roomtemp = Number(celsiusToKelvin(rawData[15]))
-				obj.errcode2 = Number(toU8(rawData[17]))
-				// app.debug('processData obj:', obj)
-				return obj
-			}
+    session = new HeaterSession({
+      mac: opts.MAC,
+      passkey: opts.password || '1234',
+      pollInterval: pollSeconds * 1000,
+      debug: app.debug
+    })
 
-			// Returnează un float cu două zecimale pentru un byte semnat sau nesemnat și un multiplicator
-			function byteToFloat(byte, multiplier, signed) {
-				multiplier = multiplier || 1;
-				if (signed) {
-					return parseFloat(toS8(byte) * multiplier).toFixed(2);
-				}
-				return parseFloat(toU8(byte) * multiplier).toFixed(2);
-			}
+    session.on('status', publishStatus)
+    session.on('failure', (message) => {
+      app.debug('BLE: %s', message)
+      app.setPluginError(message)
+    })
+    session.on('connection', (state) => {
+      if (state === 'connecting') {
+        app.setPluginStatus(`Connecting to heater ${opts.MAC}`)
+      } else if (state === 'connected') {
+        if (syncSettingsOnConnect) {
+          pushSettingsToHeater().catch((err) => app.debug('Settings sync: %s', err.message))
+        }
+      } else if (state === 'reconnecting') {
+        app.setPluginStatus('Heater disconnected, reconnecting. Is the AirHeaterBLE app connected?')
+      }
+    })
 
-			//returns a float to two decimal points for a signed/unsigned int and a multiplier
-			function bytesToFloat(byte1, byte2, multiplier, signed) {
-				multiplier = multiplier === undefined || multiplier === null ? 1 : multiplier;
-				if (signed) {
-					return parseFloat(toS16(byte1, byte2) * multiplier).toFixed(2);
-				}
-				return parseFloat(toU16(byte1, byte2) * multiplier).toFixed(2);
-			}
+    try {
+      session.start()
+    } catch (err) {
+      app.setPluginError(err.message)
+    }
+  }
 
-			//takes two bytes and returns 16bit signed int (-32768 to +32767)
-			function toS16(byte1, byte2) {
-				return Buffer.from([byte1, byte2]).readInt16BE();
-			}
+  plugin.stop = function () {
+    app.debug('Stopping')
+    // Do not savePluginOptions here. Config Save stops the plugin right after
+    // writing the form values; persisting stale in-memory flags would flip
+    // unchecked boxes (auto start/stop, push settings) back on.
+    if (session) {
+      session.stop()
+      session.removeAllListeners()
+      session = null
+    }
+    fuelTracker = null
+    app.setPluginStatus('Stopped')
+  }
 
-			//takes two bytes and returns 16 bit unsigned int (0 to 65535)
-			function toU16(byte1, byte2) {
-				return Buffer.from([byte1, byte2]).readUInt16BE();
-			}
+  function putFailure(statusCode, message) {
+    const err = new Error(message)
+    err.statusCode = statusCode
+    return err
+  }
 
-			//takes one byte and returns 8 bit int (0 to 255)
-			function toU8(byte) {
-				return Buffer.from([byte]).readInt8();
-			}
+  function currentStatus() {
+    return session ? session.lastStatus : null
+  }
 
-			function celsiusToKelvin(byte) {
-				return (Buffer.from([byte]).readInt8() + 273).toFixed(0);
-			}
+  function rawValue(value) {
+    return value && typeof value === 'object' && 'value' in value ? value.value : value
+  }
 
-			function byteToOnOff(byte) {
-				// Verifică valoarea byte-ului și returnează "OFF" sau "ON"
-				return byte === 0 ? "OFF" : "ON";
-			}
+  function toBoolean(value) {
+    const v = rawValue(value)
+    if (typeof v === 'boolean') {
+      return v
+    }
+    if (typeof v === 'number') {
+      return v !== 0
+    }
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase()
+      if (['on', 'true', '1', 'yes'].includes(s)) {
+        return true
+      }
+      if (['off', 'false', '0', 'no'].includes(s)) {
+        return false
+      }
+    }
+    return null
+  }
 
-			function byteToStatus(byte) {
-				// Obiect care mapează valorile la stringuri
-				const statusMap = {
-					0: "Warmup",
-					1: "Self test",
-					2: "Ignition",
-					3: "Heating",
-					4: "Shutting down"
-				};
+  function requireSession() {
+    if (!session || !session.connected) {
+      throw putFailure(502, 'Heater is not connected over BLE')
+    }
+  }
 
-				// Verifică dacă valoarea byte-ului există în mapare și returnează stringul corespunzător
-				return statusMap.hasOwnProperty(byte) ? statusMap[byte] : "Unknown";
-			}
+  async function setMode(mode) {
+    if (currentStatus() && currentStatus().mode === mode) {
+      return
+    }
+    await session.send(protocol.CMD.MODE, mode)
+  }
 
-			function sendDelta(obj) {
-				var updates = []
-				// app.debug('sendDelta: %j', obj)
-				for (const [key, value] of Object.entries(obj)) {
-					// app.debug(value)
-					if (typeof value != 'object' && typeof value != 'function') {
-						updates.push({ path: basePath + "." + key, value: value })
-					} else if (typeof value == 'object') {
-						for (const [key2, value2] of Object.entries(value)) {
-							// app.debug(value2)
-							if (typeof value2 != 'object') {
-								updates.push({ path: basePath + "." + key + "." + key2, value: value2 })
-							} else if (typeof value2 == 'object') {
-								for (const [key3, value3] of Object.entries(value2)) {
-									// app.debug(value3)
-									if (typeof value3 == 'string') {
-										updates.push({ path: basePath + "." + key + "." + key2 + "." + key3, value: value3 })
-									}
-								}
-							}
-						}
-					}
-				}
-				// app.debug(updates)
-				pushDelta(app, updates)
-			}
-		})
-	}
+  async function putState(value) {
+    const on = toBoolean(value)
+    if (on === null) {
+      throw putFailure(400, 'Expected true/false or on/off')
+    }
+    requireSession()
+    const status = currentStatus()
+    if (status && status.state === on) {
+      return
+    }
+    if (on && status && !protocol.canStart(status)) {
+      throw putFailure(409, `Heater cannot be started while it reports ${status.runningState}`)
+    }
+    if (!on && status && !protocol.canStop(status)) {
+      throw putFailure(409, `Heater cannot be stopped while it reports ${status.runningState}`)
+    }
+    await session.send(protocol.CMD.POWER, on ? 1 : 0)
+  }
 
-	function pushDelta(app, values) {
-		var update = { updates: [{ values: values }] }
-		app.handleMessage(plugin.id, update)
-		return
-	}
+  async function putMode(value) {
+    const mode = Number(rawValue(value))
+    if (mode !== protocol.MODE.POWER_LEVEL && mode !== protocol.MODE.TEMPERATURE) {
+      throw putFailure(400, 'Expected 1 for power level or 2 for temperature')
+    }
+    requireSession()
+    await session.send(protocol.CMD.MODE, mode)
+  }
 
-	plugin.stop = async () => {
-		app.debug("Stopping...")
-		stopped = new Promise(async (resolve) => {
-			try {
-				// unsubscribes.forEach(f => f());
-				await Promise.all(unsubscribes.map(async (f) => await f()));
-				unsubscribes = [];
-				if (intervalId) {
-					clearInterval(intervalId);
-					intervalId = null; // Setează intervalId la null după oprirea intervalului
-				}
+  async function putTargetTemperature(value) {
+    let celsius = Number(rawValue(value))
+    if (!Number.isFinite(celsius)) {
+      throw putFailure(400, 'Expected a number')
+    }
+    if (celsius > 100) {
+      celsius -= KELVIN_OFFSET
+    }
+    celsius = Math.round(celsius)
+    const { min, max } = protocol.TEMPERATURE_RANGE
+    if (celsius < min || celsius > max) {
+      throw putFailure(400, `Target temperature must be ${min}-${max}\u00b0C, got ${celsius}\u00b0C`)
+    }
+    requireSession()
+    const status = currentStatus()
+    if (status && !protocol.canSetTarget(status)) {
+      throw putFailure(409, `Heater ignores setpoints while it reports ${status.runningState}`)
+    }
+    await setMode(protocol.MODE.TEMPERATURE)
+    await session.send(protocol.CMD.TARGET, celsius)
+  }
 
-				if (RxTx) { await RxTx.stopNotifications(); }
-				if (device) { await device.disconnect(); }
+  async function putPowerLevel(value) {
+    const level = Math.round(Number(rawValue(value)))
+    const { min, max } = protocol.POWER_LEVEL_RANGE
+    if (!Number.isFinite(level) || level < min || level > max) {
+      throw putFailure(400, `Power level must be ${min}-${max}, got ${value}`)
+    }
+    requireSession()
+    const status = currentStatus()
+    if (status && !protocol.canSetTarget(status)) {
+      throw putFailure(409, `Heater ignores setpoints while it reports ${status.runningState}`)
+    }
+    await setMode(protocol.MODE.POWER_LEVEL)
+    await session.send(protocol.CMD.TARGET, level)
+  }
 
-				// Eliberare resurse
-				device = null;
-				adapter = null;
-				RxTx = null;
-				await new Promise(resolve => setTimeout(resolve, 10 * 1000))
-			} finally {
-				app.debug("Plugin stopped and Bluetooth device disconected!")
-				resolve()
-			}
-		})
-	}
+  async function putPumpType(value) {
+    const raw = rawValue(value)
+    const type = fuel.normalizePumpType(raw)
+    if (!Number.isInteger(Number(raw)) || Number(raw) !== type) {
+      throw putFailure(400, 'Pump type must be 0 (16µL), 1 (22µL), 2 (28µL) or 3 (32µL)')
+    }
+    if (fuelTracker) {
+      fuelTracker.setPumpType(type)
+      pluginOptions.pumpType = String(type)
+      publishFuel(fuelTracker.snapshot())
+      saveFuelState(true)
+    }
+    if (session && session.connected) {
+      await session.send(protocol.CMD.SET_PUMP_TYPE, type)
+    }
+  }
 
-	return plugin;
-};
+  async function putSeparateTank(value) {
+    const on = toBoolean(value)
+    if (on === null) {
+      throw putFailure(400, 'Expected true/false')
+    }
+    if (!fuelTracker) {
+      return
+    }
+    const capacity = fuelTracker.tankCapacityLiters || Number(pluginOptions.tankSource) || 5
+    applyTankSource(fuelTracker, on ? String(capacity) : 'main')
+    pluginOptions.tankSource = on ? String(fuelTracker.tankCapacityLiters || 5) : 'main'
+    publishFuel(fuelTracker.snapshot())
+    saveFuelState(true)
+    if (session && session.connected) {
+      await session.send(protocol.CMD.SET_TANK_VOLUME, fuelTracker.heaterTankIndex())
+    }
+  }
+
+  async function putTankCapacity(value) {
+    let liters = Number(rawValue(value))
+    if (!Number.isFinite(liters)) {
+      throw putFailure(400, 'Expected tank capacity in litres or m³')
+    }
+    if (liters > 0 && liters < 1) {
+      liters *= 1000
+    }
+    if (!fuelTracker) {
+      return
+    }
+    applyTankSource(fuelTracker, String(fuel.litersFromTankIndex(fuel.tankIndexFromLiters(liters)) || 5))
+    pluginOptions.tankSource = String(fuelTracker.tankCapacityLiters)
+    publishFuel(fuelTracker.snapshot())
+    saveFuelState(true)
+    if (session && session.connected) {
+      await session.send(protocol.CMD.SET_TANK_VOLUME, fuelTracker.heaterTankIndex())
+    }
+  }
+
+  async function putTemperatureOffset(value) {
+    const offset = Math.round(Number(rawValue(value)))
+    if (!Number.isFinite(offset) || offset < protocol.OFFSET_RANGE.min || offset > protocol.OFFSET_RANGE.max) {
+      throw putFailure(
+        400,
+        `Temperature offset must be ${protocol.OFFSET_RANGE.min} to ${protocol.OFFSET_RANGE.max} °C`
+      )
+    }
+    temperatureOffset = offset
+    pluginOptions.temperatureOffset = offset
+    publishFuel(fuelTracker ? fuelTracker.snapshot() : {})
+    saveFuelState(true)
+    if (session && session.connected) {
+      await session.send(protocol.CMD.SET_OFFSET, offset)
+    }
+  }
+
+  async function putAutoStartStop(value) {
+    const on = toBoolean(value)
+    if (on === null) {
+      throw putFailure(400, 'Expected true/false')
+    }
+    autoStartStop = on
+    pluginOptions.autoStartStop = on
+    publishFuel(fuelTracker ? fuelTracker.snapshot() : {})
+    saveFuelState(true)
+    if (session && session.connected) {
+      await session.send(protocol.CMD.SET_AUTO_START_STOP, on ? 1 : 0)
+    }
+  }
+
+  async function putBacklight(value) {
+    const level = Math.round(Number(rawValue(value)))
+    if (
+      !Number.isFinite(level) ||
+      level < protocol.BACKLIGHT_RANGE.min ||
+      level > protocol.BACKLIGHT_RANGE.max
+    ) {
+      throw putFailure(400, 'Backlight must be 0-100')
+    }
+    backlight = level
+    pluginOptions.backlight = level
+    publishFuel(fuelTracker ? fuelTracker.snapshot() : {})
+    saveFuelState(true)
+    if (session && session.connected) {
+      await session.send(protocol.CMD.SET_BACKLIGHT, level)
+    }
+  }
+
+  async function putRefuel(value) {
+    if (!toBoolean(value)) {
+      return
+    }
+    if (!fuelTracker || !fuelTracker.separateTank) {
+      throw putFailure(409, 'Refuel reset only applies to a separate heater tank')
+    }
+    fuelTracker.refuel()
+    publishFuel(fuelTracker.snapshot())
+    saveFuelState(true)
+  }
+
+  async function putSyncTime(value) {
+    if (!toBoolean(value)) {
+      return
+    }
+    requireSession()
+    await session.send(protocol.CMD.SYNC_TIME, protocol.encodeClockArgument())
+  }
+
+  function registerPutHandlers() {
+    const handlers = {
+      state: putState,
+      mode: putMode,
+      targetTemperature: putTargetTemperature,
+      powerLevel: putPowerLevel,
+      pumpType: putPumpType,
+      separateTank: putSeparateTank,
+      tankCapacity: putTankCapacity,
+      temperatureOffset: putTemperatureOffset,
+      autoStartStop: putAutoStartStop,
+      backlight: putBacklight,
+      refuel: putRefuel,
+      syncTime: putSyncTime
+    }
+
+    Object.keys(handlers).forEach((key) => {
+      app.registerPutHandler(
+        'vessels.self',
+        heaterPath(key),
+        (_context, _path, value, callback) => {
+          Promise.resolve()
+            .then(() => handlers[key](value))
+            .then(() => callback({ state: 'COMPLETED', statusCode: 200 }))
+            .catch((err) => {
+              const statusCode = err.statusCode || (err.code === 'ETIMEDOUT' ? 504 : 502)
+              app.debug('PUT %s failed: %s', key, err.message)
+              callback({ state: 'COMPLETED', statusCode, message: err.message })
+            })
+          return { state: 'PENDING' }
+        },
+        plugin.id
+      )
+    })
+  }
+
+  return plugin
+}
