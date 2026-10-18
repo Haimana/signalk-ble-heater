@@ -6,6 +6,7 @@ Signal K plugin to **read and control** a Vevor-style BLE diesel heater (AirHeat
 - PUT support for on/off, mode, temperature and power level  
 - Web UI at `/signalk-ble-heater/` (keyword `signalk-webapp`)  
 - Works with **signalk-navico-embedder** tiles  
+- Uses the **Signal K BLE API** (server ≥ 2.31): shows up in **Data → BLE Manager**, shares the adapter with other BLE plugins, and can reach the heater through a remote ESP32 BLE gateway. Falls back to its own node-ble connection on older servers.
 
 ## Install
 
@@ -20,6 +21,23 @@ Enable **BLE Diesel Heater** under Server → Plugin Config. Set the heater MAC 
 
 **Important:** the heater accepts only one BLE connection. Close the phone AirHeaterBLE app before enabling the plugin.
 
+## BLE backend (Signal K BLE Manager)
+
+Signal K server 2.31 and newer has a built-in BLE API (`app.bleApi`). In that mode the server owns the Bluetooth adapter (or a remote gateway), this plugin asks it for a GATT subscription to the heater (service `FFE0`, notify + write on `FFE1`), and the connection appears in **Data → BLE Manager** as a consumer holding the GATT claim for the heater's MAC.
+
+To use it:
+
+1. Signal K server **2.31 or newer**.
+2. **Server → Settings → Bluetooth**: enable server-managed local Bluetooth (`localBluetoothManaged`), or connect a remote BLE gateway that supports GATT over the gateway WebSocket (e.g. SensESP BLE gateway firmware). Advertisement-only gateways cannot drive the heater.
+3. Disable any other plugin that opens the same adapter directly with node-ble / BlueZ (for example `bt-sensors-plugin-sk` in direct mode), or make sure it does not try to connect to the heater. The heater accepts **one** BLE connection.
+4. Leave **BLE backend** on `auto` (or set `server`).
+
+`auto` picks the BLE API when `app.bleApi` exists and either the server manages local Bluetooth or a provider already sees the heater's MAC; otherwise it uses the direct node-ble connection. `server` forces the BLE API (plugin error if unavailable), `direct` forces the legacy node-ble connection. The two are never active at the same time.
+
+Diagnostics (`/signalk-ble-heater/diagnostics.html`) and the paths `electrical.heaters.<id>.ble.backend`, `.ble.connectionState`, `.ble.provider`, `.ble.rssi` show which transport and provider are in use.
+
+Write type: the server's local provider maps "write with response" to a BlueZ *reliable* write, which this heater refuses, so the plugin writes without response by default and switches once if the heater refuses or never answers (`serverWriteMode`: `auto` / `without-response` / `with-response`).
+
 ## Config
 
 | Field | Notes |
@@ -29,6 +47,8 @@ Enable **BLE Diesel Heater** under Server → Plugin Config. Set the heater MAC 
 | MAC | BLE address |
 | password | Four digits, default `1234` |
 | poll frequency | Seconds between status pings (default 15) |
+| bleBackend | `auto` (default), `server` (Signal K BLE API), `direct` (own node-ble connection) |
+| serverWriteMode | BLE API mode write type: `auto` (default), `without-response`, `with-response` |
 
 ## Paths
 

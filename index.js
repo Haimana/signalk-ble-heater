@@ -30,7 +30,7 @@
 'use strict'
 
 const protocol = require('./lib/protocol')
-const { HeaterSession } = require('./lib/heater')
+const { createSession } = require('./lib/heater')
 const fuel = require('./lib/fuel')
 
 const KELVIN_OFFSET = 273.15
@@ -55,6 +55,8 @@ module.exports = function (app) {
   let autoStartStop = false
   let backlight = 5
   let syncSettingsOnConnect = false
+  let startGeneration = 0
+  let lastLink = null
 
   plugin.schema = {
     type: 'object',
@@ -139,6 +141,24 @@ module.exports = function (app) {
         default: 5,
         minimum: 0,
         maximum: 100
+      },
+      bleBackend: {
+        type: 'string',
+        title: 'BLE backend',
+        description:
+          'auto: use the Signal K BLE API (Data -> BLE Manager) when the server manages Bluetooth or already sees the heater, otherwise connect directly. server: always use app.bleApi (Signal K >= 2.31). direct: own node-ble/BlueZ connection (legacy). Never both at once.',
+        default: 'auto',
+        enum: ['auto', 'server', 'direct'],
+        enumNames: ['Auto', 'Signal K BLE API (server / gateways)', 'Direct node-ble (legacy)']
+      },
+      serverWriteMode: {
+        type: 'string',
+        title: 'Write type in BLE API mode',
+        description:
+          'auto tries write-without-response first and switches once if the heater refuses or ignores it. Only change if the heater does not answer.',
+        default: 'auto',
+        enum: ['auto', 'without-response', 'with-response'],
+        enumNames: ['Auto', 'Write without response', 'Write with response']
       },
       syncSettingsOnConnect: {
         type: 'boolean',
@@ -328,11 +348,112 @@ module.exports = function (app) {
           displayName: `${label} sync time`
         }
       },
+      { path: heaterPath('ble.backend'), value: { description: 'BLE transport: server (Signal K BLE API) or direct (node-ble)' } },
+      { path: heaterPath('ble.connectionState'), value: { description: 'BLE link state' } },
+      { path: heaterPath('ble.provider'), value: { description: 'Signal K BLE provider that sees the heater (BLE API mode)' } },
+      { path: heaterPath('ble.rssi'), value: { description: 'Last advertised signal strength', units: 'dBm' } },
       {
         path: `environment.inside.${zone}.temperature`,
         value: { description: 'Cabin temperature measured by the heater', units: 'K' }
       }
     ])
+  }
+
+  function publishLink(info) {
+    const next = {
+      backend: info.backend,
+      connectionState: info.connectionState,
+      provider: info.provider || null,
+      rssi: typeof info.rssi === 'number' ? info.rssi : null
+    }
+    if (lastLink && Object.keys(next).every((k) => lastLink[k] === next[k])) {
+      return
+    }
+    lastLink = next
+    sendDeltas([
+      { path: heaterPath('ble.backend'), value: next.backend },
+      { path: heaterPath('ble.connectionState'), value: next.connectionState },
+      { path: heaterPath('ble.provider'), value: next.provider },
+      { path: heaterPath('ble.rssi'), value: next.rssi }
+    ])
+  }
+
+  function bleApiUsable() {
+    return Boolean(app.bleApi && typeof app.bleApi.subscribeGATT === 'function')
+  }
+
+  // Exactly one transport per start(); the old one is always stopped first.
+  async function chooseBackend(opts) {
+    const wanted = opts.bleBackend || 'auto'
+    if (wanted === 'direct') {
+      if (bleApiUsable() && app.bleApi.localBluetoothManaged) {
+        app.debug('Direct node-ble mode while Signal K also manages Bluetooth; the heater will not show in BLE Manager')
+      }
+      return 'direct'
+    }
+    if (wanted === 'server') {
+      if (!bleApiUsable()) {
+        throw new Error(
+          'Signal K BLE API (app.bleApi) is not available. It needs Signal K server 2.31 or newer; or set BLE backend to direct'
+        )
+      }
+      return 'server'
+    }
+    if (!bleApiUsable()) {
+      return 'direct'
+    }
+    if (app.bleApi.localBluetoothManaged) {
+      return 'server'
+    }
+    // Not managing the local adapter, but a remote gateway may already see it.
+    try {
+      if (opts.MAC && typeof app.bleApi.getDevice === 'function' && (await app.bleApi.getDevice(String(opts.MAC).toUpperCase()))) {
+        return 'server'
+      }
+    } catch (_e) {}
+    return 'direct'
+  }
+
+  async function startSession(opts, pollSeconds, gen) {
+    const backend = await chooseBackend(opts)
+    if (gen !== startGeneration) {
+      return
+    }
+    app.debug('BLE backend: %s', backend)
+    const next = createSession(backend, {
+      mac: opts.MAC,
+      passkey: opts.password || '1234',
+      pollInterval: pollSeconds * 1000,
+      debug: app.debug,
+      bleApi: app.bleApi,
+      pluginId: plugin.id,
+      writeMode: opts.serverWriteMode,
+      backoffMin: opts._backoffMin
+    })
+    session = next
+
+    next.on('status', publishStatus)
+    next.on('link', publishLink)
+    next.on('failure', (message) => {
+      app.debug('BLE: %s', message)
+      app.setPluginError(message)
+    })
+    next.on('connection', (state) => {
+      if (state === 'connecting') {
+        app.setPluginStatus(
+          backend === 'server'
+            ? `Connecting to heater ${opts.MAC} via Signal K BLE API`
+            : `Connecting to heater ${opts.MAC}`
+        )
+      } else if (state === 'connected') {
+        if (syncSettingsOnConnect) {
+          pushSettingsToHeater().catch((err) => app.debug('Settings sync: %s', err.message))
+        }
+      } else if (state === 'reconnecting') {
+        app.setPluginStatus('Heater disconnected, reconnecting. Is the AirHeaterBLE app connected?')
+      }
+    })
+    next.start()
   }
 
   function publishFuel(snapshot) {
@@ -598,49 +719,32 @@ module.exports = function (app) {
     publishFuel(snap)
     registerPutHandlers()
 
-    session = new HeaterSession({
-      mac: opts.MAC,
-      passkey: opts.password || '1234',
-      pollInterval: pollSeconds * 1000,
-      debug: app.debug
-    })
-
-    session.on('status', publishStatus)
-    session.on('failure', (message) => {
-      app.debug('BLE: %s', message)
-      app.setPluginError(message)
-    })
-    session.on('connection', (state) => {
-      if (state === 'connecting') {
-        app.setPluginStatus(`Connecting to heater ${opts.MAC}`)
-      } else if (state === 'connected') {
-        if (syncSettingsOnConnect) {
-          pushSettingsToHeater().catch((err) => app.debug('Settings sync: %s', err.message))
-        }
-      } else if (state === 'reconnecting') {
-        app.setPluginStatus('Heater disconnected, reconnecting. Is the AirHeaterBLE app connected?')
+    lastLink = null
+    const gen = ++startGeneration
+    startSession(opts, pollSeconds, gen).catch((err) => {
+      if (gen === startGeneration) {
+        app.setPluginError(err.message)
       }
     })
-
-    try {
-      session.start()
-    } catch (err) {
-      app.setPluginError(err.message)
-    }
   }
 
-  plugin.stop = function () {
+  // Async so the server can wait for the GATT claim to be released; callers
+  // that do not await still get a synchronous stop of polling and timers.
+  plugin.stop = async function () {
     app.debug('Stopping')
+    startGeneration++
     // Do not savePluginOptions here. Config Save stops the plugin right after
     // writing the form values; persisting stale in-memory flags would flip
     // unchecked boxes (auto start/stop, push settings) back on.
-    if (session) {
-      session.stop()
-      session.removeAllListeners()
-      session = null
-    }
+    const current = session
+    session = null
     fuelTracker = null
     app.setPluginStatus('Stopped')
+    if (current) {
+      const done = current.stop()
+      current.removeAllListeners()
+      await done
+    }
   }
 
   function putFailure(statusCode, message) {

@@ -1,11 +1,11 @@
 {
   "name": "signalk-ble-heater",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.0",
   "description": "Read and control a Vevor-style BLE diesel heater from Signal K, with a touch web UI for KIP and Navico MFDs",
   "homepage": "https://github.com/Haimana/signalk-ble-heater",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/protocol.test.js test/fuel.test.js test/plugin.test.js"
+    "test": "node --test test/protocol.test.js test/fuel.test.js test/plugin.test.js test/server-backend.test.js"
   },
   "keywords": [
     "signalk-node-server-plugin",

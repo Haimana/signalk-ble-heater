@@ -173,6 +173,8 @@ body {
   <div class="line"><span class="k">Connection</span><span class="v" id="link">--</span></div>
   <div class="line"><span class="k">Last update</span><span class="v muted" id="age">--</span></div>
   <div class="line"><span class="k">Frame / variant</span><span class="v muted" id="proto">--</span></div>
+  <div class="line"><span class="k">BLE backend</span><span class="v muted" id="bleBackend">--</span></div>
+  <div class="line"><span class="k">Provider / RSSI</span><span class="v muted" id="bleProvider">--</span></div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -421,6 +423,14 @@ body {
         ? '--'
         : (data.frameLength || '?') + ' B / 0x' + Number(variant).toString(16);
     el('proto').textContent = variantText;
+    var ble = data.ble || {};
+    el('bleBackend').textContent = ble.backend
+      ? (ble.backend === 'server' ? 'Signal K BLE API' : 'Direct node-ble') +
+        (ble.connectionState ? ' (' + ble.connectionState + ')' : '')
+      : '--';
+    el('bleProvider').textContent = ble.backend === 'server'
+      ? (ble.provider || '?') + (typeof ble.rssi === 'number' ? ' / ' + ble.rssi + ' dBm' : '')
+      : '--';
 
     el('autoBtn').disabled = busy;
     el('autoBtn').className = data.autoStartStop ? 'on' : '';
@@ -442,6 +452,14 @@ body {
       'separateTank', 'tankCapacity', 'fuelRemaining', 'fuelConsumedSinceRefuel',
       'temperatureOffset', 'autoStartStop', 'backlight'
     ];
+    if (tree.ble && typeof tree.ble === 'object') {
+      var bleKeys = ['backend', 'connectionState', 'provider', 'rssi'];
+      data.ble = data.ble || {};
+      for (var b = 0; b < bleKeys.length; b++) {
+        var bn = tree.ble[bleKeys[b]];
+        if (bn && typeof bn === 'object' && 'value' in bn) { data.ble[bleKeys[b]] = bn.value; }
+      }
+    }
     for (var i = 0; i < keys.length; i++) {
       var node = tree[keys[i]];
       if (node && typeof node === 'object' && 'value' in node) {
@@ -494,7 +512,12 @@ body {
         for (var v = 0; v < values.length; v++) {
           if (values[v].path && values[v].path.indexOf(prefix) === 0) {
             var key = values[v].path.substring(prefix.length);
-            data[key] = values[v].value;
+            if (key.indexOf('ble.') === 0) {
+              data.ble = data.ble || {};
+              data.ble[key.substring(4)] = values[v].value;
+            } else {
+              data[key] = values[v].value;
+            }
             timestamps[key] = ts || timestamps[key];
             touched = true;
           }
