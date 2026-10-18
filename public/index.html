@@ -5,131 +5,252 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Diesel Heater</title>
 <!--
-  Deliberately old-fashioned: XMLHttpRequest instead of fetch, flexbox instead
-  of grid, no template literals, hex colours only. The Navico proxy downlevels
-  modern CSS for the MFD browser, which tells us how old it is.
+  LCD-style controller modelled on the AirHeater BLE wall controller (segment
+  display, level bar, fan / glow plug / pump / flame icons, fault code) and the
+  AirHeaterBLE phone app (Mode / Up / Down / big power key, voltage + chamber
+  readouts).
+
+  Deliberately old-fashioned: XMLHttpRequest instead of fetch, flexbox with
+  -webkit-box fallbacks instead of grid, no template literals, no CSS
+  variables, hex colours only, inline SVG, no external fonts or CDNs. The
+  Navico proxy downlevels modern CSS for the MFD browser, and the boat is
+  usually offline.
 -->
 <style>
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
 body {
   margin: 0; padding: 8px;
   font-family: Helvetica, Arial, sans-serif;
-  background: #14181d; color: #e8edf2;
+  background: #0e1114; color: #e8edf2;
   -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
 }
-.bar {
+.device {
   display: -webkit-box; display: flex;
-  -webkit-box-align: center; align-items: center;
+  -webkit-box-orient: horizontal; flex-direction: row;
+  -webkit-box-align: stretch; align-items: stretch;
+  background: #23272c;
+  background-image: linear-gradient(#2e333a, #1b1e22);
+  border: 1px solid #3a4048; border-radius: 22px;
+  padding: 12px; box-shadow: 0 6px 18px #000000;
+}
+.screen {
+  -webkit-box-flex: 1; flex: 1 1 auto; min-width: 0;
+  background: #050806;
+  background-image: linear-gradient(#0b100d, #030504);
+  border: 2px solid #000000; border-radius: 10px;
+  padding: 8px 12px 10px 12px;
+  box-shadow: inset 0 0 18px #000000;
+}
+.keys {
+  -webkit-box-flex: 0; flex: 0 0 auto; width: 148px; margin-left: 12px;
+  display: -webkit-box; display: flex;
+  -webkit-box-orient: vertical; flex-direction: column;
   -webkit-box-pack: justify; justify-content: space-between;
-  padding: 6px 10px; margin-bottom: 8px;
-  background: #1d232a; border-radius: 6px; min-height: 44px;
-}
-.bar .state { font-size: 20px; font-weight: bold; }
-.bar .link { font-size: 13px; color: #8b99a7; }
-.fault { background: #5a1d1d; color: #ffd9d9; }
-.row { display: -webkit-box; display: flex; }
-.main { margin-bottom: 8px; }
-.power {
-  -webkit-box-flex: 0; flex: 0 0 34%;
-  margin-right: 8px; border: none; border-radius: 8px;
-  background: #2a333d; color: #e8edf2;
-  font-size: 30px; font-weight: bold; min-height: 190px;
-}
-.power.on { background: #1f6b3a; }
-.power:disabled { opacity: 0.4; }
-.panel {
-  -webkit-box-flex: 1; flex: 1 1 auto;
-  background: #1d232a; border-radius: 8px; padding: 10px;
-}
-.modes { display: -webkit-box; display: flex; margin-bottom: 10px; }
-.modes button {
-  -webkit-box-flex: 1; flex: 1 1 0; margin-right: 6px;
-  padding: 12px 4px; border: 2px solid #2f3a45; border-radius: 6px;
-  background: #232b33; color: #b9c5d1; font-size: 16px;
-}
-.modes button:last-child { margin-right: 0; }
-.modes button.sel { border-color: #4b93d1; color: #ffffff; background: #24405a; }
-.setpoint {
-  display: -webkit-box; display: flex;
   -webkit-box-align: center; align-items: center;
 }
-.setpoint button {
-  width: 78px; height: 96px; border: none; border-radius: 8px;
-  background: #2a333d; color: #e8edf2; font-size: 40px; font-weight: bold;
+.krow { display: -webkit-box; display: flex; width: 100%; -webkit-box-pack: justify; justify-content: space-between; }
+.key {
+  position: relative; overflow: hidden;
+  width: 66px; height: 58px; padding: 0;
+  border: 1px solid #0a0b0c; border-radius: 14px;
+  background: #3a3f46; background-image: linear-gradient(#4a5058, #2a2e33);
+  color: #dfe6ee; font-size: 13px; font-weight: bold;
+  box-shadow: 0 3px 0 #0b0c0e, inset 0 1px 0 #5d646d;
 }
-.setpoint button:disabled { opacity: 0.35; }
-.setpoint .value {
-  -webkit-box-flex: 1; flex: 1 1 auto; text-align: center;
-  font-size: 54px; font-weight: bold;
+.key svg { display: block; margin: 2px auto 0 auto; }
+.key span { display: block; font-size: 11px; color: #a9b4bf; margin-top: 1px; }
+.key:active { box-shadow: 0 1px 0 #0b0c0e, inset 0 1px 0 #5d646d; top: 2px; }
+.key:disabled { opacity: 0.35; }
+.key.wide { width: 100%; }
+.power {
+  position: relative; overflow: hidden;
+  width: 112px; height: 112px; padding: 0; border-radius: 56px;
+  border: 2px solid #0a0b0c;
+  background: #33383e; background-image: linear-gradient(#4b525a, #22262b);
+  box-shadow: 0 4px 0 #0b0c0e, inset 0 1px 0 #626a73;
+  color: #3fd36b;
 }
-.setpoint .value small { display: block; font-size: 13px; color: #8b99a7; font-weight: normal; }
-.readouts { display: -webkit-box; display: flex; }
-.cell {
-  -webkit-box-flex: 1; flex: 1 1 0; margin-right: 8px;
-  background: #1d232a; border-radius: 6px; padding: 8px 10px; text-align: center;
+.power.on { color: #ff9a2e; }
+.power:disabled { opacity: 0.35; }
+.power .fill {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 0;
+  background: #1f5a33;
 }
-.cell:last-child { margin-right: 0; }
-.cell .k { font-size: 12px; color: #8b99a7; }
-.cell .v { font-size: 24px; font-weight: bold; }
+.power.on .fill { background: #6b3a12; }
+.power.holding .fill { height: 100%; -webkit-transition: height 1.5s linear; transition: height 1.5s linear; }
+.power svg { position: relative; display: block; margin: 0 auto; }
+.power .hint { position: relative; display: block; font-size: 11px; color: #c4ccd5; margin-top: 2px; }
+
+/* --- LCD content --- */
+.top { display: -webkit-box; display: flex; -webkit-box-align: center; align-items: center; -webkit-box-pack: justify; justify-content: space-between; height: 26px; }
+.small { color: #8fd3ff; font-size: 14px; }
+.brand {
+  color: #9aa6b2; font-size: 13px; letter-spacing: 1px;
+  border-top: 1px solid #56616c; border-radius: 40px 40px 0 0;
+  padding: 2px 16px 0 16px; text-align: center; min-width: 110px;
+}
+.icons { display: -webkit-box; display: flex; -webkit-box-align: center; align-items: center; height: 34px; margin-top: 2px; }
+.icons .ic { margin-right: 10px; }
+.icons .gap { -webkit-box-flex: 1; flex: 1 1 auto; }
+.ic { display: inline-block; width: 28px; height: 28px; }
+.ic svg { width: 28px; height: 28px; display: block; }
+.ic .p { fill: #1a241d; stroke: #1a241d; }
+.ic.lit .p { fill: #7dff6a; stroke: #7dff6a; }
+.ic.amber.lit .p { fill: #ffb43c; stroke: #ffb43c; }
+.ic.red.lit .p { fill: #ff4b3e; stroke: #ff4b3e; }
+.ic.blue.lit .p { fill: #4fb3ff; stroke: #4fb3ff; }
+.blink { -webkit-animation: blink 1s steps(2, start) infinite; animation: blink 1s steps(2, start) infinite; }
+.spin svg { -webkit-animation: spin 1.2s linear infinite; animation: spin 1.2s linear infinite; }
+@-webkit-keyframes blink { to { visibility: hidden; } }
+@keyframes blink { to { visibility: hidden; } }
+@-webkit-keyframes spin { from { -webkit-transform: rotate(0deg); } to { -webkit-transform: rotate(360deg); } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.mid { display: -webkit-box; display: flex; -webkit-box-align: center; align-items: center; margin-top: 4px; }
+.roomwrap { -webkit-box-flex: 1; flex: 1 1 auto; text-align: center; }
+.lbl { color: #ffd23f; font-size: 11px; letter-spacing: 1px; }
+.lbl.dim { color: #3a3a22; }
+.seg { display: inline-block; vertical-align: bottom; white-space: nowrap; }
+.seg svg { display: inline-block; vertical-align: bottom; }
+.unit { color: #ffd23f; font-size: 22px; vertical-align: top; margin-left: 2px; }
+.setbox {
+  -webkit-box-flex: 0; flex: 0 0 auto; text-align: center;
+  border: 1px solid #2c3a2e; border-radius: 8px; padding: 4px 8px; margin-left: 8px; min-width: 120px;
+}
+.state {
+  text-align: center; font-size: 22px; font-weight: bold; color: #b9c5d1;
+  margin: 2px 0 4px 0; letter-spacing: 1px; height: 28px; overflow: hidden;
+}
+.state.run { color: #7dff6a; }
+.state.warm { color: #ffb43c; }
+.state.fault { color: #ff4b3e; }
+.bar { display: -webkit-box; display: flex; height: 14px; }
+.bar i { display: block; -webkit-box-flex: 1; flex: 1 1 0; margin-right: 4px; background: #172019; border-radius: 2px; }
+.bar i:last-child { margin-right: 0; }
+.barlbl { display: -webkit-box; display: flex; -webkit-box-pack: justify; justify-content: space-between; color: #6f7c88; font-size: 11px; margin-top: 2px; }
+.reads { display: -webkit-box; display: flex; margin-top: 8px; border-top: 1px solid #1d2a22; padding-top: 6px; }
+.rd { -webkit-box-flex: 1; flex: 1 1 0; text-align: center; }
+.rd .k { color: #6f7c88; font-size: 11px; }
+.rd .v { color: #dfe8f0; font-size: 20px; font-weight: bold; }
+
+.extras { display: -webkit-box; display: flex; margin-top: 8px; }
+.ex { -webkit-box-flex: 1; flex: 1 1 0; margin-right: 6px; background: #181c20; border: 1px solid #262c33; border-radius: 8px; padding: 6px 4px; text-align: center; }
+.ex:last-child { margin-right: 0; }
+.ex .k { font-size: 11px; color: #7f8b97; }
+.ex .v { font-size: 16px; font-weight: bold; color: #dfe6ee; }
+.msg { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: #3b2a12; color: #ffd9a8; font-size: 14px; display: none; }
+.msg.fault { background: #4a1612; color: #ffd6d2; }
 .toast {
-  position: fixed; left: 8px; right: 8px; bottom: 8px;
-  padding: 12px; border-radius: 6px; background: #5a1d1d; color: #ffe2e2;
+  position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 5;
+  padding: 12px; border-radius: 8px; background: #5a1d1d; color: #ffe2e2;
   font-size: 16px; text-align: center; display: none;
 }
-.nav {
-  display: -webkit-box; display: flex; margin-bottom: 8px;
+.toast.info { background: #1d3a5a; color: #e2f0ff; }
+
+/* Narrow (phone portrait, KIP side panel): keys under the screen. */
+@media (max-width: 599px) {
+  body { padding: 6px; }
+  .device { -webkit-box-orient: vertical; flex-direction: column; padding: 10px; border-radius: 18px; }
+  .keys { width: auto; margin-left: 0; margin-top: 10px; -webkit-box-orient: horizontal; flex-direction: row; -webkit-box-pack: justify; justify-content: space-between; }
+  .krow { width: auto; }
+  .krow .key { margin-right: 6px; }
+  .key { width: 58px; height: 56px; }
+  .power { width: 96px; height: 96px; border-radius: 48px; }
+  .setbox { min-width: 96px; }
+  .extras { -webkit-box-lines: multiple; flex-wrap: wrap; }
+  .ex { -webkit-box-flex: 0; flex: 0 0 31%; margin-bottom: 6px; }
 }
-.nav a {
-  -webkit-box-flex: 1; flex: 1 1 0;
-  text-align: center; text-decoration: none;
-  padding: 12px 6px; margin-right: 6px;
-  border-radius: 6px; background: #1d232a; color: #8b99a7; font-size: 16px;
+/* Short landscape tiles (MFD split screens). */
+@media (max-height: 430px) {
+  body { padding: 4px; }
+  .device { padding: 8px; border-radius: 16px; }
+  .screen { padding: 4px 10px 6px 10px; }
+  .icons { height: 28px; }
+  .ic, .ic svg { width: 24px; height: 24px; }
+  .state { font-size: 18px; height: 22px; margin: 0 0 2px 0; }
+  .reads { margin-top: 4px; padding-top: 4px; }
+  .rd .v { font-size: 17px; }
+  .key { height: 50px; }
+  .power { width: 92px; height: 92px; border-radius: 46px; }
+  .extras { margin-top: 4px; }
+  .ex { padding: 3px 2px; }
 }
-.nav a:last-child { margin-right: 0; }
-.nav a.on { background: #24405a; color: #ffffff; }
 </style>
 </head>
 <body>
 
-<div class="nav">
-  <a class="on" href="index.html">Control</a>
-  <a href="diagnostics.html">Diagnostics</a>
-</div>
-
-<div class="bar" id="bar">
-  <span class="state" id="state">Connecting…</span>
-  <span class="link" id="link"></span>
-</div>
-
-<div class="row main">
-  <button class="power" id="power" disabled>OFF</button>
-  <div class="panel">
-    <div class="modes">
-      <button id="modeLevel">Power level</button>
-      <button id="modeTemp">Temperature</button>
+<div class="device">
+  <div class="screen">
+    <div class="top">
+      <span class="small" id="alt">&#9650; -- m</span>
+      <span class="brand" id="brand">AirHeater</span>
+      <span class="seg" id="clock"></span>
     </div>
-    <div class="setpoint">
-      <button id="down" disabled>&minus;</button>
-      <div class="value"><span id="setpoint">--</span><small id="setpointLabel">setpoint</small></div>
-      <button id="up" disabled>+</button>
+
+    <div class="icons">
+      <span class="ic" id="icFan" title="Fan"><svg viewBox="0 0 28 28"><circle class="p" cx="14" cy="14" r="2.6"/><path class="p" d="M14 11 C12 6 13 2 17 3 C20 4 18 9 14 11 Z"/><path class="p" d="M16.6 15.5 C21.8 15.2 25 17.6 23.4 21 C22 23.8 17.8 20.4 16.6 15.5 Z"/><path class="p" d="M11.4 15.5 C8.6 19.8 4.8 21.6 3.4 18.2 C2.4 15.4 7 13.6 11.4 15.5 Z"/></svg></span>
+      <span class="ic amber" id="icGlow" title="Glow plug"><svg viewBox="0 0 28 28"><rect class="p" x="11" y="2" width="6" height="5" rx="1"/><path class="p" fill="none" stroke-width="2.2" d="M14 7 L14 9 L9 11 L19 14 L9 17 L19 20 L14 22 L14 26"/></svg></span>
+      <span class="ic" id="icPump" title="Fuel pump"><svg viewBox="0 0 28 28"><path class="p" d="M14 2 C10 9 6 13 6 18 C6 23 10 26 14 26 C18 26 22 23 22 18 C22 13 18 9 14 2 Z"/></svg></span>
+      <span class="ic amber" id="icFlame" title="Flame"><svg viewBox="0 0 28 28"><path class="p" d="M14 2 C15 7 20 9 20 16 C20 22 17 26 14 26 C10 26 7 23 7 18 C7 14 10 12 10 8 C12 10 12 12 13 13 C14 10 14 6 14 2 Z"/></svg></span>
+      <span class="gap"></span>
+      <span class="ic red" id="icWarn" title="Fault"><svg viewBox="0 0 28 28"><path class="p" d="M14 2 L27 25 L1 25 Z"/></svg></span>
+      <span class="seg" id="errSeg" style="margin-right:10px"></span>
+      <span class="ic blue" id="icBle" title="BLE link"><svg viewBox="0 0 28 28"><path class="p" fill="none" stroke-width="2.4" d="M8 8 L20 19 L14 25 L14 3 L20 9 L8 20"/></svg></span>
     </div>
+
+    <div class="mid">
+      <div class="roomwrap">
+        <div class="lbl">ROOM</div>
+        <span class="seg" id="roomSeg"></span><span class="unit">&deg;C</span>
+      </div>
+      <div class="setbox">
+        <div class="lbl" id="setLbl">SET</div>
+        <span class="seg" id="setSeg"></span><span class="unit" id="setUnit"></span>
+        <div class="lbl" id="modeLbl">--</div>
+      </div>
+    </div>
+
+    <div class="state" id="state">Connecting&hellip;</div>
+
+    <div class="bar" id="bar"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="barlbl"><span>Min</span><span>Run level</span><span>Max</span></div>
+
+    <div class="reads">
+      <div class="rd"><div class="k">Supply</div><div class="v" id="voltage">--</div></div>
+      <div class="rd"><div class="k">Chamber</div><div class="v" id="chamber">--</div></div>
+      <div class="rd"><div class="k">Level</div><div class="v" id="level">--</div></div>
+      <div class="rd"><div class="k">Fuel</div><div class="v" id="fuelRate">--</div></div>
+    </div>
+  </div>
+
+  <div class="keys">
+    <div class="krow">
+      <button class="key" id="mode" disabled><svg width="26" height="22" viewBox="0 0 26 22"><path fill="none" stroke="#4fb3ff" stroke-width="2.4" d="M3 8 L20 8 M15 3 L20 8 L15 13 M23 15 L6 15 M11 10 L6 15 L11 20"/></svg><span>Mode</span></button>
+      <button class="key" id="settings"><svg width="24" height="22" viewBox="0 0 24 24"><path fill="#c9d2db" d="M10 1h4l1 3 2.6 1.1 2.8-1.5 2.8 2.8-1.5 2.8L23 10v4l-3 1-1.1 2.6 1.5 2.8-2.8 2.8-2.8-1.5L14 23h-4l-1-3-2.6-1.1-2.8 1.5-2.8-2.8 1.5-2.8L1 14v-4l3-1 1.1-2.6-1.5-2.8 2.8-2.8 2.8 1.5L10 1z M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z"/></svg><span>Setup</span></button>
+    </div>
+    <div class="krow">
+      <button class="key" id="down" disabled><svg width="24" height="22" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#4fb3ff" stroke-width="2"/><path d="M7 12h10" stroke="#4fb3ff" stroke-width="2.4"/></svg><span>Down</span></button>
+      <button class="key" id="up" disabled><svg width="24" height="22" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#4fb3ff" stroke-width="2"/><path d="M7 12h10M12 7v10" stroke="#4fb3ff" stroke-width="2.4"/></svg><span>Up</span></button>
+    </div>
+    <button class="power" id="power" disabled>
+      <span class="fill" id="powerFill"></span>
+      <svg width="46" height="46" viewBox="0 0 46 46"><path fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" d="M15 10 A16 16 0 1 0 31 10 M23 4 L23 22"/></svg>
+      <span class="hint" id="powerHint">Hold to start</span>
+    </button>
   </div>
 </div>
 
-<div class="readouts">
-  <div class="cell"><div class="k">Cabin</div><div class="v" id="cabin">--</div></div>
-  <div class="cell"><div class="k">Chamber</div><div class="v" id="chamber">--</div></div>
-  <div class="cell"><div class="k">Supply</div><div class="v" id="voltage">--</div></div>
-  <div class="cell"><div class="k">Level</div><div class="v" id="level">--</div></div>
+<div class="extras">
+  <div class="ex"><div class="k">Today</div><div class="v" id="fuelToday">--</div></div>
+  <div class="ex"><div class="k">Tank</div><div class="v" id="tankLeft">--</div></div>
+  <div class="ex"><div class="k">Pump</div><div class="v" id="pumpLabel">--</div></div>
+  <div class="ex"><div class="k">BLE</div><div class="v" id="bleInfo">--</div></div>
+  <div class="ex"><div class="k">Link</div><div class="v" id="link">--</div></div>
 </div>
 
-<div class="readouts" style="margin-top:8px;">
-  <div class="cell"><div class="k">Fuel</div><div class="v" id="fuelRate">--</div></div>
-  <div class="cell"><div class="k">Today</div><div class="v" id="fuelToday">--</div></div>
-  <div class="cell"><div class="k">Tank</div><div class="v" id="tankLeft">--</div></div>
-  <div class="cell"><div class="k">Pump</div><div class="v" id="pumpLabel">--</div></div>
-</div>
-
+<div class="msg" id="msg"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -141,17 +262,92 @@ body {
   var LEVEL_MIN = 1, LEVEL_MAX = 10;
   var TEMP_MIN = 8, TEMP_MAX = 36;
   var KELVIN = 273.15;
+  var HOLD_MS = 1500;
 
   // Injected by signalk-navico-embedder into pages it proxies to the MFD.
   // On a normal browser the Signal K session cookie is used instead.
   var token = window.SK_TOKEN || null;
   var base = '/signalk/v1/api/vessels/self/electrical/heaters/';
   var heaterId = null;
-  var data = {};
+  var data = { ble: {} };
   var busy = false;
   var pollTimer = null;
+  var linkText = '--';
+  var lastFrameAt = 0;
 
   function el(id) { return document.getElementById(id); }
+
+  // ---------------------------------------------------------------------
+  // Seven-segment renderer (inline SVG, unlit segments drawn as ghosts
+  // like a real LCD).
+  // ---------------------------------------------------------------------
+  var SEGMENTS = {
+    '0': 'abcdef', '1': 'bc', '2': 'abdeg', '3': 'abcdg', '4': 'bcfg',
+    '5': 'acdfg', '6': 'acdefg', '7': 'abc', '8': 'abcdefg', '9': 'abcdfg',
+    '-': 'g', ' ': '', 'E': 'adefg', 'L': 'def', 'H': 'bcefg', 'b': 'cdefg',
+    'o': 'cdeg', 'F': 'aefg', 'P': 'abefg', 'r': 'eg', 'n': 'ceg', 'A': 'abcefg',
+    'd': 'bcdeg', 'C': 'adef', 'c': 'deg', 't': 'defg', 'U': 'bcdef', 'S': 'acdfg'
+  };
+  function hseg(y, x1, x2) {
+    return x1 + ',' + y + ' ' + (x1 + 4) + ',' + (y - 4) + ' ' + (x2 - 4) + ',' + (y - 4) + ' ' +
+      x2 + ',' + y + ' ' + (x2 - 4) + ',' + (y + 4) + ' ' + (x1 + 4) + ',' + (y + 4);
+  }
+  function vseg(x, y1, y2) {
+    return x + ',' + y1 + ' ' + (x + 4) + ',' + (y1 + 4) + ' ' + (x + 4) + ',' + (y2 - 4) + ' ' +
+      x + ',' + y2 + ' ' + (x - 4) + ',' + (y2 - 4) + ' ' + (x - 4) + ',' + (y1 + 4);
+  }
+  var GEOMETRY = {
+    a: hseg(6, 9, 41), g: hseg(45, 9, 41), d: hseg(84, 9, 41),
+    f: vseg(6, 9, 42), b: vseg(44, 9, 42), e: vseg(6, 48, 81), c: vseg(44, 48, 81)
+  };
+  var ORDER = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+
+  function digitSvg(ch, dot, height, on, off) {
+    var lit = SEGMENTS.hasOwnProperty(ch) ? SEGMENTS[ch] : '';
+    if (ch === ':') {
+      var cw = Math.round(height * 18 / 92);
+      return '<svg width="' + cw + '" height="' + height + '" viewBox="0 0 18 92">' +
+        '<circle cx="9" cy="30" r="5" fill="' + on + '"/><circle cx="7" cy="62" r="5" fill="' + on + '"/></svg>';
+    }
+    var w = Math.round(height * 68 / 92);
+    var s = '<svg width="' + w + '" height="' + height + '" viewBox="0 0 68 92">' +
+      '<g transform="skewX(-6) translate(14,0)">';
+    for (var i = 0; i < ORDER.length; i++) {
+      var k = ORDER[i];
+      s += '<polygon points="' + GEOMETRY[k] + '" fill="' + (lit.indexOf(k) >= 0 ? on : off) + '"/>';
+    }
+    s += '<circle cx="50" cy="85" r="4.2" fill="' + (dot ? on : off) + '"/>';
+    return s + '</g></svg>';
+  }
+
+  // text like "18.5", "E01", "L 3"; width pads on the left with blanks
+  function segText(id, text, width, height, on, off) {
+    var cells = [];
+    var str = String(text);
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === '.' && cells.length) { cells[cells.length - 1].dot = true; continue; }
+      cells.push({ ch: ch, dot: false });
+    }
+    while (cells.length < width) { cells.unshift({ ch: ' ', dot: false }); }
+    var html = '';
+    for (var j = 0; j < cells.length; j++) {
+      html += digitSvg(cells[j].ch, cells[j].dot, height, on || '#ffd23f', off || '#1d2416');
+    }
+    el(id).innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------
+  // Sizing: digits scale with the available screen width / height.
+  // ---------------------------------------------------------------------
+  function bigHeight() {
+    var w = window.innerWidth || 800;
+    var h = window.innerHeight || 480;
+    if (h <= 430) { return 64; }
+    if (w < 400) { return 62; }
+    if (w < 600) { return 74; }
+    return 92;
+  }
 
   function request(method, url, body, cb) {
     var xhr = new XMLHttpRequest();
@@ -167,11 +363,14 @@ body {
     xhr.send(body ? JSON.stringify(body) : null);
   }
 
-  function toast(message) {
+  var toastTimer = null;
+  function toast(message, info) {
     var node = el('toast');
     node.textContent = message;
+    node.className = info ? 'toast info' : 'toast';
     node.style.display = 'block';
-    window.setTimeout(function () { node.style.display = 'none'; }, 4000);
+    if (toastTimer) { window.clearTimeout(toastTimer); }
+    toastTimer = window.setTimeout(function () { node.style.display = 'none'; }, 4000);
   }
 
   function celsius(kelvin) {
@@ -181,6 +380,15 @@ body {
 
   function show(id, value, suffix) {
     el(id).textContent = (value === null || value === undefined) ? '--' : value + (suffix || '');
+  }
+
+  function setIcon(id, lit, blink, spin) {
+    var node = el(id);
+    var cls = node.className.replace(/\s*(lit|blink|spin)\b/g, '');
+    if (lit) { cls += ' lit'; }
+    if (lit && blink) { cls += ' blink'; }
+    if (lit && spin) { cls += ' spin'; }
+    node.className = cls;
   }
 
   // Mirrors the plugin's own rules, which come from the heater's behaviour:
@@ -197,49 +405,138 @@ body {
     return (data.powerLevel === null || data.powerLevel === undefined) ? null : data.powerLevel;
   }
 
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
   function render() {
-    var faulted = data.powerStatus === 'error' || !!data.errorCode || !!data.errorMessage || !!data.lastErrorMessage;
-    el('bar').className = faulted ? 'bar fault' : 'bar';
-    el('bar').style.background = '';
+    var hBig = bigHeight();
+    var hSet = Math.round(hBig * 0.62);
+    var hSmall = 20;
 
-    var label = data.runningState || 'Unknown';
-    var faultText = data.errorMessage || data.lastErrorMessage;
-    if (faultText) {
-      label += ' — ' + (data.errorLabel ? data.errorLabel + ' ' : '') + faultText;
+    var step = data.runningStepCode;
+    if (step === undefined || step === null) {
+      step = { 'Standby': 0, 'Self-test': 1, 'Ignition': 2, 'Running': 3, 'Cooldown': 4 }[data.runningState];
     }
-    el('state').textContent = label;
+    var faultNow = data.powerStatus === 'error' || !!data.errorCode;
+    var faultText = data.errorMessage || (faultNow ? null : data.lastErrorMessage);
+    var code = data.errorCode || data.displayErrorCode || 0;
 
-    var power = el('power');
-    power.textContent = data.state ? 'ON' : 'OFF';
-    power.className = data.state ? 'power on' : 'power';
-    power.disabled = busy || !(data.state ? canStop() : canStart());
+    // Top line
+    el('alt').innerHTML = '&#9650; ' + (data.altitude === null || data.altitude === undefined ? '--' : data.altitude) + ' m';
+    el('brand').textContent = heaterId ? ('AirHeater \u00b7 ' + heaterId) : 'AirHeater';
+    var now = new Date();
+    segText('clock', pad2(now.getHours()) + ':' + pad2(now.getMinutes()), 5, hSmall, '#8fd3ff', '#0f1a22');
 
-    el('modeLevel').className = data.mode === MODE_LEVEL ? 'sel' : '';
-    el('modeTemp').className = data.mode === MODE_TEMP ? 'sel' : '';
+    // Icons. Component states are inferred from the running step (the AA55
+    // frame carries no per-component bits): self-test = fan + glow plug,
+    // ignition = fan + glow plug + pump, running = fan + pump + flame,
+    // cooldown = fan.
+    setIcon('icFan', step >= 1 && step <= 4, false, step >= 1 && step <= 4);
+    setIcon('icGlow', step === 1 || step === 2, step === 2, false);
+    setIcon('icPump', step === 2 || step === 3, step === 2, false);
+    setIcon('icFlame', step === 3, false, false);
+    setIcon('icWarn', faultNow || !!data.lastErrorMessage, faultNow, false);
+    var bleState = data.ble && data.ble.connectionState;
+    var live = lastFrameAt && (Date.now() - lastFrameAt) < 60000;
+    setIcon('icBle', bleState === 'connected' || (!bleState && live), bleState && bleState !== 'connected', false);
 
+    if (code) {
+      segText('errSeg', 'E' + pad2(code), 3, 22, '#ff4b3e', '#2a1311');
+      el('errSeg').className = faultNow ? 'seg blink' : 'seg';
+    } else {
+      segText('errSeg', '   ', 3, 22, '#ff4b3e', '#1c1412');
+      el('errSeg').className = 'seg';
+    }
+
+    // Room temperature, big. A live fault flashes the code instead, like the
+    // hardware controller.
+    var room = celsius(data.roomTemperature);
+    if (faultNow && code) {
+      segText('roomSeg', 'E' + pad2(code), 3, hBig, '#ff4b3e', '#2a1311');
+      el('roomSeg').className = 'seg blink';
+    } else {
+      segText('roomSeg', room === null ? '--' : room.toFixed(1), 3, hBig);
+      el('roomSeg').className = 'seg';
+    }
+
+    // Setpoint box
     var isTemp = data.mode === MODE_TEMP;
     var value = setpointValue();
-    show('setpoint', value, isTemp ? '\u00b0' : '');
-    el('setpointLabel').textContent = isTemp ? 'target \u00b0C' : 'power level';
-    el('up').disabled = busy || !canSetTarget();
-    el('down').disabled = busy || !canSetTarget();
+    if (isTemp) {
+      segText('setSeg', value === null ? '--' : String(Math.round(value)), 2, hSet);
+      el('setUnit').innerHTML = '&deg;C';
+      el('modeLbl').textContent = 'SMART / TEMP';
+    } else {
+      segText('setSeg', value === null ? '--' : 'L' + (value < 10 ? ' ' : '') + value, 3, hSet);
+      el('setUnit').innerHTML = '';
+      // Mode byte 0 is what the heater reports while it is off.
+      el('modeLbl').textContent = data.mode === MODE_LEVEL ? 'LEVEL' : 'OFF \u00b7 LEVEL';
+    }
 
-    show('cabin', celsius(data.roomTemperature), '\u00b0');
-    show('chamber', celsius(data.temperature), '\u00b0');
-    show('voltage', data.voltage === null || data.voltage === undefined ? null : data.voltage.toFixed(1), 'V');
+    // Big state line, as in the phone app.
+    var st = el('state');
+    var label = data.runningState || (heaterId ? 'Unknown' : st.textContent);
+    if (faultNow) {
+      st.textContent = (data.errorLabel || ('E' + pad2(code))) + ' ' + (data.errorMessage || 'Fault');
+      st.className = 'state fault';
+    } else {
+      st.textContent = label === 'Standby' ? 'StandBy' : label;
+      st.className = step === 3 ? 'state run' : (step === 1 || step === 2 || step === 4) ? 'state warm' : 'state';
+    }
+
+    // Level bar: 10 cells green -> yellow -> red, lit up to the level the
+    // heater is running at (or the chosen level when idle in level mode).
+    var lvl = data.currentPowerLevel;
+    if ((lvl === null || lvl === undefined) && step >= 1 && step <= 3) { lvl = data.powerLevel; }
+    var cells = el('bar').getElementsByTagName('i');
+    var colours = ['#3fd36b', '#3fd36b', '#3fd36b', '#7fdc3c', '#b9e03a', '#e8dc35', '#f2c230', '#f29a2e', '#f2622e', '#f2382e'];
+    for (var c = 0; c < cells.length; c++) {
+      cells[c].style.background = (lvl && c < lvl) ? colours[c] : '#172019';
+    }
+
+    // Readouts row inside the LCD
+    show('voltage', data.voltage === null || data.voltage === undefined ? null : Number(data.voltage).toFixed(1), ' V');
+    var chamber = celsius(data.temperature);
+    show('chamber', chamber === null ? null : Math.round(chamber), '\u00b0C');
     show('level', data.currentPowerLevel);
-
     var rateL = data.fuelRate == null ? null : Number(data.fuelRate) * 1000 * 3600;
+    show('fuelRate', rateL === null ? null : rateL.toFixed(2), ' L/h');
+
+    // Extras strip
     var todayL = data.fuelConsumedToday == null ? null : Number(data.fuelConsumedToday) * 1000;
-    show('fuelRate', rateL === null ? null : rateL.toFixed(2), 'L/h');
-    show('fuelToday', todayL === null ? null : todayL.toFixed(2), 'L');
+    show('fuelToday', todayL === null ? null : todayL.toFixed(2), ' L');
     if (data.separateTank && data.fuelRemaining != null) {
-      show('tankLeft', (Number(data.fuelRemaining) * 1000).toFixed(1), 'L');
+      show('tankLeft', (Number(data.fuelRemaining) * 1000).toFixed(1), ' L');
     } else {
       el('tankLeft').textContent = 'main';
     }
-    var pumpMap = { 0: '16µL', 1: '22µL', 2: '28µL', 3: '32µL' };
+    var pumpMap = { 0: '16 \u00b5L', 1: '22 \u00b5L', 2: '28 \u00b5L', 3: '32 \u00b5L' };
     el('pumpLabel').textContent = pumpMap[data.pumpType] || '--';
+    var ble = data.ble || {};
+    var bleTxt = ble.backend === 'server' ? 'SK' : (ble.backend === 'direct' ? 'direct' : '--');
+    if (typeof ble.rssi === 'number') { bleTxt += ' ' + ble.rssi + 'dBm'; }
+    el('bleInfo').textContent = bleTxt;
+    el('link').textContent = linkText;
+
+    // Fault / sticky fault message
+    var msg = el('msg');
+    if (faultNow || faultText) {
+      msg.textContent = faultNow
+        ? 'Heater fault ' + (data.errorLabel || ('E' + pad2(code))) + ': ' + (data.errorMessage || 'see diagnostics')
+        : 'Last fault: ' + faultText;
+      msg.className = faultNow ? 'msg fault' : 'msg';
+      msg.style.display = 'block';
+    } else {
+      msg.style.display = 'none';
+    }
+
+    // Keys
+    var power = el('power');
+    power.className = data.state ? 'power on' + (holding ? ' holding' : '') : 'power' + (holding ? ' holding' : '');
+    power.disabled = busy || !heaterId || !(data.state ? canStop() : canStart());
+    el('powerHint').textContent = data.state ? 'Hold to stop' : 'Hold to start';
+    el('mode').disabled = busy || !heaterId || !canSetTarget();
+    el('up').disabled = busy || !heaterId || !canSetTarget();
+    el('down').disabled = busy || !heaterId || !canSetTarget();
   }
 
   // A PUT handled asynchronously answers 202 with a request to poll, so the UI
@@ -264,7 +561,9 @@ body {
     request('PUT', base + heaterId + '/' + key, { value: value }, function (status, body) {
       var finish = function (code, payload) {
         busy = false;
-        if (code >= 400) {
+        if (code === 401 || code === 403) {
+          toast('Signal K login with write access required');
+        } else if (code >= 400) {
           toast((payload && payload.message) ? payload.message : 'Command refused (' + code + ')');
         }
         snapshot();
@@ -277,11 +576,11 @@ body {
     });
   }
 
-  function step(delta) {
+  function stepSetpoint(delta) {
     var isTemp = data.mode === MODE_TEMP;
     var current = setpointValue();
     if (current === null) { current = isTemp ? 20 : 3; }
-    var next = current + delta;
+    var next = Math.round(current) + delta;
     var min = isTemp ? TEMP_MIN : LEVEL_MIN;
     var max = isTemp ? TEMP_MAX : LEVEL_MAX;
     if (next < min) { next = min; }
@@ -291,14 +590,27 @@ body {
   }
 
   function absorb(tree) {
-    var keys = ['state', 'powerStatus', 'runningState', 'mode', 'targetTemperature',
-                'powerLevel', 'currentPowerLevel', 'temperature', 'voltage',
-                'roomTemperature', 'displayErrorCode', 'errorCode', 'errorMessage',
-                'errorLabel', 'lastErrorMessage',
+    var keys = ['state', 'powerStatus', 'runningState', 'runningStepCode', 'powerStatusCode',
+                'mode', 'targetTemperature', 'powerLevel', 'currentPowerLevel', 'temperature',
+                'voltage', 'altitude', 'roomTemperature', 'displayErrorCode', 'errorCode',
+                'errorMessage', 'errorLabel', 'lastErrorMessage',
                 'pumpType', 'fuelRate', 'fuelConsumedToday', 'separateTank', 'fuelRemaining'];
     for (var i = 0; i < keys.length; i++) {
       var node = tree[keys[i]];
-      if (node && typeof node === 'object' && 'value' in node) { data[keys[i]] = node.value; }
+      if (node && typeof node === 'object' && 'value' in node) {
+        data[keys[i]] = node.value;
+        if (keys[i] === 'runningState' && node.timestamp) {
+          var t = Date.parse(node.timestamp);
+          if (t) { lastFrameAt = t; }
+        }
+      }
+    }
+    if (tree.ble && typeof tree.ble === 'object') {
+      var bk = ['backend', 'connectionState', 'provider', 'rssi'];
+      for (var b = 0; b < bk.length; b++) {
+        var bn = tree.ble[bk[b]];
+        if (bn && typeof bn === 'object' && 'value' in bn) { data.ble[bk[b]] = bn.value; }
+      }
     }
     render();
   }
@@ -307,13 +619,14 @@ body {
     if (!heaterId) { return; }
     request('GET', base + heaterId + '/', null, function (status, body) {
       if (status === 200 && body) { absorb(body); }
-      else if (status === 401 || status === 403) { el('link').textContent = 'login required'; }
+      else if (status === 401 || status === 403) { linkText = 'login'; render(); }
     });
   }
 
   function startPolling() {
     if (pollTimer) { return; }
-    el('link').textContent = 'polling';
+    linkText = 'polling';
+    render();
     pollTimer = window.setInterval(snapshot, 3000);
   }
 
@@ -327,7 +640,8 @@ body {
     try { ws = new WebSocket(url); } catch (e) { startPolling(); return; }
 
     ws.onopen = function () {
-      el('link').textContent = 'live';
+      linkText = 'live';
+      render();
       ws.send(JSON.stringify({
         context: 'vessels.self',
         subscribe: [{ path: 'electrical.heaters.' + heaterId + '.*', policy: 'instant' }]
@@ -343,14 +657,18 @@ body {
         var values = message.updates[u].values || [];
         for (var v = 0; v < values.length; v++) {
           if (values[v].path && values[v].path.indexOf(prefix) === 0) {
-            data[values[v].path.substring(prefix.length)] = values[v].value;
+            var key = values[v].path.substring(prefix.length);
+            if (key.indexOf('ble.') === 0) {
+              data.ble[key.substring(4)] = values[v].value;
+            } else {
+              data[key] = values[v].value;
+              if (key === 'runningState') { lastFrameAt = Date.now(); }
+            }
             touched = true;
           }
         }
       }
-      if (touched) {
-        render();
-      }
+      if (touched) { render(); }
     };
     ws.onclose = function () { startPolling(); };
     ws.onerror = function () { startPolling(); };
@@ -385,12 +703,62 @@ body {
     });
   }
 
-  el('power').onclick = function () { put('state', !data.state); };
-  el('modeLevel').onclick = function () { put('mode', MODE_LEVEL); };
-  el('modeTemp').onclick = function () { put('mode', MODE_TEMP); };
-  el('up').onclick = function () { step(1); };
-  el('down').onclick = function () { step(-1); };
+  // ---------------------------------------------------------------------
+  // Power key: press and hold for HOLD_MS. A short tap only explains, so a
+  // stray touch on an MFD can never start or stop combustion.
+  // ---------------------------------------------------------------------
+  var holding = false;
+  var holdTimer = null;
+  var lastTouch = 0;
 
+  function holdStart(e) {
+    if (e && e.type === 'touchstart') { lastTouch = Date.now(); }
+    if (e && e.type === 'mousedown' && Date.now() - lastTouch < 800) { return; }
+    if (e && e.preventDefault) { e.preventDefault(); }
+    var power = el('power');
+    if (power.disabled || holding) { return; }
+    holding = true;
+    render();
+    holdTimer = window.setTimeout(function () {
+      holdTimer = null;
+      holding = false;
+      put('state', !data.state);
+      toast(data.state ? 'Stopping heater…' : 'Starting heater…', true);
+    }, HOLD_MS);
+  }
+
+  function holdEnd(e) {
+    if (e && e.type === 'mouseup' && Date.now() - lastTouch < 800) { return; }
+    if (!holding) { return; }
+    holding = false;
+    if (holdTimer) {
+      window.clearTimeout(holdTimer);
+      holdTimer = null;
+      toast(data.state ? 'Hold the power key to stop' : 'Hold the power key to start', true);
+    }
+    render();
+  }
+
+  var powerKey = el('power');
+  powerKey.addEventListener('touchstart', holdStart, false);
+  powerKey.addEventListener('touchend', holdEnd, false);
+  powerKey.addEventListener('touchcancel', holdEnd, false);
+  powerKey.addEventListener('mousedown', holdStart, false);
+  powerKey.addEventListener('mouseup', holdEnd, false);
+  powerKey.addEventListener('mouseleave', holdEnd, false);
+  powerKey.oncontextmenu = function () { return false; };
+
+  el('mode').onclick = function () {
+    put('mode', data.mode === MODE_TEMP ? MODE_LEVEL : MODE_TEMP);
+  };
+  el('up').onclick = function () { stepSetpoint(1); };
+  el('down').onclick = function () { stepSetpoint(-1); };
+  el('settings').onclick = function () { window.location.href = 'diagnostics.html'; };
+
+  window.onresize = function () { render(); };
+  window.setInterval(render, 15000); // clock + link freshness
+
+  render();
   discover();
 })();
 </script>
