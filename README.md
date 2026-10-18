@@ -38,6 +38,8 @@ Diagnostics (`/signalk-ble-heater/diagnostics.html`) and the paths `electrical.h
 
 Write type: the server's local provider maps "write with response" to a BlueZ *reliable* write, which this heater refuses, so the plugin writes without response by default and switches once if the heater refuses or never answers (`serverWriteMode`: `auto` / `without-response` / `with-response`).
 
+Stale links: if a previous Signal K process (or anything else) left the heater connected in BlueZ, the heater stops advertising and no provider sees it. With `releaseStaleLink` on (default), the plugin checks BlueZ once at startup and again whenever the heater is not seen within the wait window; if `org.bluez.Device1.Connected` is true and no plugin holds a GATT claim on the MAC, it calls `Device1.Disconnect()` (D-Bus, fallback `bluetoothctl disconnect`) and keeps waiting. A link claimed by another plugin is never touched; a leftover claim of this plugin itself is released through `app.bleApi.releaseGATTDevice`. At most one release every 30 s.
+
 ## Config
 
 | Field | Notes |
@@ -48,6 +50,7 @@ Write type: the server's local provider maps "write with response" to a BlueZ *r
 | password | Four digits, default `1234` |
 | poll frequency | Seconds between status pings (default 15) |
 | bleBackend | `auto` (default), `server` (Signal K BLE API), `direct` (own node-ble connection) |
+| releaseStaleLink | BLE API mode: disconnect an orphaned BlueZ link nobody claims (default on) |
 | serverWriteMode | BLE API mode write type: `auto` (default), `without-response`, `with-response` |
 
 ## Paths

@@ -151,6 +151,13 @@ module.exports = function (app) {
         enum: ['auto', 'server', 'direct'],
         enumNames: ['Auto', 'Signal K BLE API (server / gateways)', 'Direct node-ble (legacy)']
       },
+      releaseStaleLink: {
+        type: 'boolean',
+        title: 'Release stale BLE link (BLE API mode)',
+        description:
+          'If the heater is still connected in BlueZ but no Signal K plugin holds it (e.g. left over from a previous server process), disconnect it so it advertises again. Never touches a link another plugin has claimed.',
+        default: true
+      },
       serverWriteMode: {
         type: 'string',
         title: 'Write type in BLE API mode',
@@ -428,7 +435,17 @@ module.exports = function (app) {
       bleApi: app.bleApi,
       pluginId: plugin.id,
       writeMode: opts.serverWriteMode,
-      backoffMin: opts._backoffMin
+      releaseStaleLink: opts.releaseStaleLink !== false,
+      info: (message) => {
+        app.debug(message)
+        if (typeof app.setPluginStatus === 'function') {
+          app.setPluginStatus(message)
+        }
+      },
+      backoffMin: opts._backoffMin,
+      waitDeviceTimeout: opts._waitDeviceTimeout,
+      closeTimeout: opts._closeTimeout,
+      bluez: opts._bluez
     })
     session = next
 

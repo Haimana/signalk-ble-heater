@@ -76,7 +76,16 @@ function loadPlugin(app) {
 
 function options(extra = {}) {
   return Object.assign(
-    { id: 'cabinHeater', zone: 'saloon', MAC, password: '1234', pollFrequency: 2, _backoffMin: 20 },
+    {
+      id: 'cabinHeater',
+      zone: 'saloon',
+      MAC,
+      password: '1234',
+      pollFrequency: 2,
+      _backoffMin: 20,
+      // never reach for the real BlueZ in tests
+      _bluez: { isConnected: async () => false, disconnect: async () => 'fake' }
+    },
     extra
   )
 }
@@ -255,4 +264,118 @@ test('bleBackend server without app.bleApi reports a clear plugin error', async 
   } finally {
     await plugin.stop()
   }
+})
+
+// --- stale BlueZ link handling -------------------------------------------
+
+const { FakeBluez } = require('./fake-bleapi')
+
+function staleSetup(apiOptions = {}, bluezOptions = {}, pluginOptions = {}) {
+  const heater = new FakeHeater()
+  const bleApi = new FakeBleApi(heater, apiOptions)
+  const bluez = new FakeBluez(bleApi, MAC_UC, bluezOptions)
+  const app = createApp(bleApi)
+  const plugin = loadPlugin(app)
+  plugin.start(options(Object.assign({ _bluez: bluez, _waitDeviceTimeout: 200 }, pluginOptions)))
+  return { heater, bleApi, bluez, app, plugin }
+}
+
+test('an orphaned BlueZ link is disconnected at startup and the heater then connects', async () => {
+  const { app, plugin, bleApi, bluez } = staleSetup()
+  try {
+    await waitFor(() => latestValue(app, BASE + 'runningState') !== undefined, 'first status')
+    assert.strictEqual(bluez.disconnects.length, 1)
+    assert.deepStrictEqual(bluez.disconnects[0], { adapter: 'hci0', mac: MAC_UC })
+    assert.strictEqual(bleApi.getGATTClaims().get(MAC_UC), 'signalk-ble-heater')
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a stale link that appears while waiting is released after the wait window', async () => {
+  // Not connected at the startup check, connected (orphaned) afterwards.
+  const { app, plugin, bluez } = staleSetup({}, { connected: false })
+  setTimeout(() => {
+    bluez.connected = true
+  }, 50)
+  try {
+    await waitFor(() => latestValue(app, BASE + 'runningState') !== undefined, 'first status', 5000)
+    assert.strictEqual(bluez.disconnects.length, 1)
+    assert.ok(bluez.checks >= 2)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a link claimed by another plugin is never disconnected', async () => {
+  const heater = new FakeHeater()
+  const bleApi = new FakeBleApi(heater)
+  bleApi.claims.set(MAC_UC, 'bt-sensors-plugin-sk')
+  const bluez = new FakeBluez(bleApi, MAC_UC)
+  const app = createApp(bleApi)
+  const plugin = loadPlugin(app)
+  plugin.start(options({ _bluez: bluez, _waitDeviceTimeout: 200 }))
+  try {
+    await waitFor(() => app.error !== null, 'plugin error', 3000)
+    assert.match(app.error, /bt-sensors-plugin-sk/)
+    assert.strictEqual(bluez.checks, 0)
+    assert.strictEqual(bluez.disconnects.length, 0)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('releaseStaleLink false leaves BlueZ alone', async () => {
+  const { plugin, app, bluez } = staleSetup({}, {}, { releaseStaleLink: false })
+  try {
+    await waitFor(() => app.error !== null, 'not-seen error', 3000)
+    assert.match(app.error, /not seen/)
+    assert.strictEqual(bluez.checks, 0)
+    assert.strictEqual(bluez.disconnects.length, 0)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a leftover claim of this plugin is released through the BLE API, not BlueZ', async () => {
+  const heater = new FakeHeater()
+  const bleApi = new FakeBleApi(heater)
+  bleApi.see(MAC_UC)
+  bleApi.claims.set(MAC_UC, 'signalk-ble-heater')
+  const bluez = new FakeBluez(bleApi, MAC_UC)
+  const app = createApp(bleApi)
+  const plugin = loadPlugin(app)
+  plugin.start(options({ _bluez: bluez, _waitDeviceTimeout: 200 }))
+  try {
+    await waitFor(() => latestValue(app, BASE + 'runningState') !== undefined, 'first status')
+    assert.strictEqual(bleApi.releaseCalls, 1)
+    assert.strictEqual(bluez.disconnects.length, 0)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('the server-held link of our own live session is never touched', async () => {
+  const { app, plugin, bleApi, bluez } = staleSetup({}, { connected: false })
+  bleApi.see(MAC_UC)
+  try {
+    await waitFor(() => latestValue(app, BASE + 'ble.connectionState') === 'connected', 'connected')
+    // BlueZ now reports Connected for our own link.
+    bluez.connected = true
+    bleApi.handles[0]._drop()
+    await waitFor(() => bleApi.subscribeCalls === 2 && bleApi.handles[1].connected, 'resubscribe', 5000)
+    assert.strictEqual(bluez.disconnects.length, 0)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('stop() returns even when the GATT close never settles', async () => {
+  const { app, plugin, bleApi } = staleSetup({}, { connected: false }, { _closeTimeout: 100 })
+  bleApi.see(MAC_UC)
+  await waitFor(() => latestValue(app, BASE + 'ble.connectionState') === 'connected', 'connected')
+  bleApi.handles[0].close = () => new Promise(() => {})
+  const started = Date.now()
+  await plugin.stop()
+  assert.ok(Date.now() - started < 1000, 'stop took too long')
 })

@@ -68,6 +68,15 @@ class FakeBleApi {
     return new Map(this.claims)
   }
 
+  async releaseGATTDevice(mac, pluginId) {
+    this.releaseCalls = (this.releaseCalls || 0) + 1
+    const key = mac.toUpperCase()
+    if (this.claims.get(key) !== pluginId) {
+      throw new Error(`Device ${key} is claimed by ${this.claims.get(key)}, not ${pluginId}`)
+    }
+    this.claims.delete(key)
+  }
+
   async subscribeGATT(descriptor, pluginId, callback) {
     this.subscribeCalls++
     const mac = descriptor.mac.toUpperCase()
@@ -152,4 +161,33 @@ class FakeBleApi {
   }
 }
 
-module.exports = { FakeBleApi }
+// Stand-in for BlueZ: an orphaned link keeps the heater from advertising
+// until it is disconnected.
+class FakeBluez {
+  constructor(bleApi, mac, { connected = true, failDisconnect = false } = {}) {
+    this.bleApi = bleApi
+    this.mac = mac
+    this.connected = connected
+    this.failDisconnect = failDisconnect
+    this.checks = 0
+    this.disconnects = []
+  }
+
+  async isConnected(adapter, mac) {
+    this.checks++
+    return mac === this.mac && this.connected
+  }
+
+  async disconnect(adapter, mac) {
+    if (this.failDisconnect) {
+      throw new Error('org.bluez.Error.Failed')
+    }
+    this.disconnects.push({ adapter, mac })
+    this.connected = false
+    // Free again: the heater starts advertising.
+    setTimeout(() => this.bleApi.advertise(mac, -58), 10)
+    return 'dbus'
+  }
+}
+
+module.exports = { FakeBleApi, FakeBluez }
